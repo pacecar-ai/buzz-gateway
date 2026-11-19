@@ -244,7 +244,7 @@ export function enrollmentPage(): Response {
       <h2 id="approve-heading" tabindex="-1">Approve the agent key</h2>
       <p class="instructions">In Buzz Desktop, go to</p>
       <p class="menu-path">Settings <span aria-hidden="true">›</span> Buzz <span aria-hidden="true">›</span> Security</p>
-      <p class="instructions">Choose <strong>Authorize external identity</strong>, paste the agent’s public key, and review the approval in Buzz.</p>
+      <p class="instructions">Under <strong>Authorize external identity</strong>, paste the key into <strong>Application public key (hex)</strong> and click <strong>Authorize identity</strong>.</p>
       <div class="key">
         <div class="key-line">
           <span class="key-label">Agent public key</span>
@@ -259,7 +259,7 @@ export function enrollmentPage(): Response {
       <div class="field">
         <label for="proof">Ownership proof from Buzz</label>
         <input id="proof" type="password" autocomplete="off" spellcheck="false" required aria-describedby="proof-hint approve-error">
-        <p class="field-hint" id="proof-hint">After approving the key, copy the ownership proof that Buzz shows and paste it here.</p>
+        <p class="field-hint" id="proof-hint">After approving the key, click <strong>Copy ownership proof</strong> in Buzz and paste it here.</p>
       </div>
       <p class="feedback" id="approve-error" role="alert"></p>
       <div class="actions">
