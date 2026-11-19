@@ -5,6 +5,7 @@
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true,
+    "rewriteRelativeImportExtensions": true,
     "verbatimModuleSyntax": true,
     "strict": true,
     "skipLibCheck": true,
