@@ -51,8 +51,9 @@ async function listener(host, signal) {
           const line = buffer.slice(0, newline);
           buffer = buffer.slice(newline + 1);
           try {
-            const [kind, value] = JSON.parse(line);
-            if (kind === "ready" && /^http:\/\/127\.0\.0\.1:\d+\/buzz\/[A-Za-z0-9_-]{32}$/.test(value)) ready.resolve(value);
+            const [kind, value, receipt] = JSON.parse(line);
+            if (kind === "ready" && /^http:\/\/127\.0\.0\.1:\d+\/buzz\/[A-Za-z0-9_-]{32}$/.test(value)
+              && invitationPattern.test(receipt)) ready.resolve({ callback: value, receipt });
             if (kind === "code" && /^[A-Za-z0-9_-]{1,2048}$/.test(value)) received.resolve(value);
           } catch { stop(new Error("Invalid sign-in return.")); }
         }
@@ -67,12 +68,12 @@ async function listener(host, signal) {
     if (signal.aborted) { signal.removeEventListener("abort", cancelled); throw error; }
     manual = true;
   }
-  const callback = manual ? manualCallback() : await ready.promise;
+  const { callback, receipt } = manual ? { callback: manualCallback() } : await ready.promise;
   const pasted = deferred();
   const abortPaste = () => pasted.reject(new Error("Sign-in was cancelled."));
   signal.addEventListener("abort", abortPaste, { once: true });
   return {
-    callback, manual, code: manual ? pasted.promise : received.promise,
+    callback, receipt, manual, code: manual ? pasted.promise : received.promise,
     paste(value) {
       const url = new URL(value.trim());
       const code = url.searchParams.get("code");
@@ -197,7 +198,7 @@ export function apply(ctx) {
       update({ activity: { label, text: "Checking approval…" } });
       if ((await call(invite, { ...fields, step: step("approve") }, active)).approved) return;
       returned = await listener(ctx.host, active);
-      const started = await call(invite, { ...fields, step: step("start"), callback: returned.callback }, active);
+      const started = await call(invite, { ...fields, step: step("start"), callback: returned.callback, receipt: returned.receipt }, active);
       if (started.approved) return;
       const url = new URL(started.url);
       if (url.protocol !== "https:" || url.username || url.password || url.searchParams.get("return_to") !== returned.callback) {

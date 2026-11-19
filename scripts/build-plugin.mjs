@@ -26,7 +26,7 @@ const manifest = {
   id: "pacecar.vercel", name: "Vercel", apiVersion: 1,
   description: "Connect Vercel agents to your Buzz community. Buzz handles approval and the agent list.",
   host: { ...(removal && { federatedIdentity: { authority: removal.authority, operations: [{ method: "POST", path: removal.path }] } }), commands: [], networkOrigins: [origin.origin], processes: [
-    { id: "sign-in-return", program: "node", args: ["-e", compiled, "--"] },
+    { id: "sign-in-return", program: "node", args: ["-e", compiled, "--", origin.origin + "/connect/return/"] },
   ] },
 };
 const template = await readFile(new URL("../buzz-plugin/plugin.js", import.meta.url), "utf8");

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>Return to Buzz</title>
+  <link rel="icon" href="/connect/assets/buzz.png">
+  <link rel="stylesheet" href="/connect/connect.css">
+  <script type="module" src="/connect/return/return.js"></script>
+</head>
+<body>
+  <main class="panel">
+    <div class="brands" aria-label="Buzz and Vercel">
+      <span><img src="/connect/assets/buzz.png" width="30" height="30" alt="">Buzz</span>
+      <i aria-hidden="true"></i>
+      <span><b class="triangle" aria-hidden="true"></b>Vercel</span>
+    </div>
+    <div role="status" aria-atomic="true">
+      <h1 id="title">Back to Buzz</h1>
+      <p id="intro" class="intro">Open Buzz Desktop to see your agents and their connection status.</p>
+    </div>
+    <ul id="agents" class="agents" aria-label="Agent approvals" hidden></ul>
+    <div class="actions">
+      <a id="open" class="button primary" href="buzz://">Return to Buzz</a>
+      <button id="retry" class="button secondary" type="button" hidden>Check again</button>
+    </div>
+    <p id="help" class="help" role="status" hidden>If Buzz didn’t open, switch to Buzz Desktop. You can close this tab.</p>
+  </main>
+</body>
+</html>

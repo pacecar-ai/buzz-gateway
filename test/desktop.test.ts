@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { schnorr } from "@noble/curves/secp256k1.js";
@@ -137,16 +138,22 @@ test("invitation, owner, identity, lease and expiry bind a desktop sign-in", asy
 });
 
 test("the desktop helper binds a real loopback port and delivers only its one-time callback", async () => {
-  const proc = spawn(process.execPath, ["buzz-plugin/callback.cjs"], { stdio: ["ignore", "pipe", "pipe"] });
+  const page = "https://gateway.example.org/connect/return/";
+  const source = await readFile("buzz-plugin/callback.cjs", "utf8");
+  const proc = spawn(process.execPath, ["-e", source, "--", page], { stdio: ["ignore", "pipe", "pipe"] });
   const lines = createInterface({ input: proc.stdout })[Symbol.asyncIterator]();
   try {
-    const [kind, address] = JSON.parse((await lines.next()).value!);
+    const [kind, address, receipt] = JSON.parse((await lines.next()).value!);
     assert.equal(kind, "ready");
     assert.match(address, /^http:\/\/127\.0\.0\.1:\d+\/buzz\/[A-Za-z0-9_-]{32}$/);
     assert.equal((await fetch(new URL("/unrelated?code=local-test", address))).status, 404);
-    const returned = await fetch(address + "?code=local-fixture");
-    assert.equal(returned.status, 200);
-    assert(!(await returned.text()).includes("local-fixture"));
+    const returned = await fetch(address + "?code=local-fixture", { redirect: "manual" });
+    assert.equal(returned.status, 303);
+    assert.match(receipt, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(returned.headers.get("location"), page + "#" + receipt);
+    assert.equal(returned.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(returned.headers.get("cache-control"), "no-store");
+    assert.equal(await returned.text(), "");
     assert.deepEqual(JSON.parse((await lines.next()).value!), ["code", "local-fixture"]);
   } finally { proc.kill(); }
 });
@@ -162,8 +169,19 @@ test("a refused batch member can retry without replacing the other agent’s gra
     return issue(...args);
   };
   async function complete() {
-    const start = await (await f.post(ref, { step: "batch-start", callback, members: selected })).json();
-    return f.post(ref, { step: "batch-finish", attempt: start.attempt, code: "new-code", members: selected });
+    const receipt = randomBytes(32).toString("base64url");
+    const start = await (await f.post(ref, { step: "batch-start", callback, receipt, members: selected })).json();
+    assert.equal((await f.post(receipt, { step: "list" })).status, 410);
+    assert.equal((await f.post(ref, { step: "receipt" })).status, 410);
+    const progress = await (await f.post(receipt, { step: "receipt" })).json();
+    assert.equal(progress.agents[1].status, "pending");
+    const response = await f.post(ref, { step: "batch-finish", attempt: start.attempt, code: "new-code", members: selected });
+    const result = await (await f.post(receipt, { step: "receipt" })).json();
+    assert.deepEqual(Object.keys(result.agents[0]).sort(), ["name", "picture", "status"]);
+    assert.equal(result.agents[0].name, "first");
+    assert.equal(result.agents[0].status, "approved");
+    assert.equal(result.agents[1].status, response.status === 200 ? "approved" : "attention");
+    return response;
   }
   const partial = await complete();
   assert.equal(partial.status, 409);

@@ -1,13 +1,30 @@
 <!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="referrer" content="no-referrer"><meta name="color-scheme" content="light dark">
-<title>Connect Vercel to Buzz</title>
-<link rel="stylesheet" href="/connect/connect.css"><script src="/connect/connect.js" type="module"></script>
-</head><body><main>
-<div class="mark" aria-hidden="true"></div>
-<h1>Vercel for Buzz</h1>
-<p id="intro">Add the Vercel plugin to Buzz Desktop to see your agents in Settings.</p>
-<div class="actions"><a class="primary" id="open" hidden>Open agents in Buzz</a><a class="secondary" id="install" hidden>Install plugin in Buzz</a></div>
-<p id="help" role="status">Loading the plugin…</p>
-</main></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>Vercel for Buzz</title>
+  <link rel="icon" href="/connect/assets/buzz.png">
+  <link rel="stylesheet" href="/connect/connect.css">
+  <script type="module" src="/connect/connect.js"></script>
+</head>
+<body>
+  <main class="panel">
+    <div class="brands" aria-label="Buzz and Vercel">
+      <span><img src="/connect/assets/buzz.png" width="30" height="30" alt="">Buzz</span>
+      <i aria-hidden="true"></i>
+      <span><b class="triangle" aria-hidden="true"></b>Vercel</span>
+    </div>
+    <h1 id="title">Vercel for Buzz</h1>
+    <p id="intro" class="intro">Install the plugin to bring your Vercel agents into Buzz Desktop.</p>
+    <div class="actions">
+      <a id="install" class="button primary" hidden>Install plugin in Buzz</a>
+      <a id="open" class="button secondary" hidden>Open agents in Buzz</a>
+    </div>
+    <p id="help" class="help" role="status">Loading the plugin…</p>
+    <noscript><p>Enable JavaScript to open the plugin installer.</p></noscript>
+  </main>
+</body>
+</html>

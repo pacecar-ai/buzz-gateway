@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { Agent } from "./config.ts";
 import { readConnectProfile } from "./connect-profile.ts";
 import { CredentialRefusedError, fromConnect, requestAssertion, signingKey } from "./credentials.ts";
-import { ApprovalBusy, issueDesktopGrant, readDesktopGrant, type DesktopGrant } from "./desktop-grants.ts";
+import { ApprovalBusy, desktopGrantPath, issueDesktopGrant, readDesktopGrant, type DesktopGrant } from "./desktop-grants.ts";
 import { enrollAgent, exchangeLogin, loginUrl, ownerProof } from "./enrollment.ts";
 import { errorName, log } from "./log.ts";
 import { healthPath, hexId, readJson, registrationId } from "./protocol.ts";
@@ -13,13 +13,32 @@ import type { State } from "./state.ts";
 
 export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 type Invitation = { owner: string; community: string; members: { id: string; pubkey: string; binding: string }[]; expiresAt: number };
-type Attempt = { member: string; handoff: string; verifier: string; expiresAt: number };
+type Attempt = { member: string; handoff: string; verifier: string; expiresAt: number; hasReceipt?: boolean };
+type Receipt = {
+  attemptPath: string;
+  signInExpiresAt: number;
+  expiresAt: number;
+  agents: { name: string; picture?: string; grantPath?: string }[];
+};
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const handle = () => randomBytes(32).toString("base64url");
 const binding = (agent: Agent) => digest(JSON.stringify([agent.namespace, agent.credentialConnector, agent.federatedIdentityAdapter, agent.desktop]));
 const pathFor = (kind: string, key: string) => "desktop/" + kind + "/" + digest(key) + ".json";
 const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff" };
 const reply = (body: unknown, status = 200) => Response.json(body, { status, headers });
+
+async function readReceipt(token: string, state: State) {
+  const receipt = (await state.read<Receipt>(pathFor("receipts", token)))?.value;
+  if (!receipt || receipt.expiresAt <= Date.now()) return reply({ error: "Open Buzz to check this approval." }, 410);
+  const attempt = await state.read<{ finished?: boolean }>(receipt.attemptPath);
+  const ended = attempt?.value.finished || receipt.signInExpiresAt <= Date.now();
+  const agents = await Promise.all(receipt.agents.map(async ({ name, picture, grantPath }) => {
+    // A sealed grant is written only after the issuer confirms this exact agent and owner.
+    const granted = !grantPath || Boolean((await state.read<{ sealed?: unknown }>(grantPath))?.value.sealed);
+    return { name, picture, status: granted ? "approved" : ended ? "attention" : "pending" };
+  }));
+  return reply({ agents });
+}
 
 export async function createHandoff(agents: Agent[], state: State, expiresAt: number) {
   const first = agents[0];
@@ -43,16 +62,17 @@ function localCallback(value: string): boolean {
 }
 const base = z.object({ owner: hexId, community: z.string().max(512) });
 const selected = z.object({ id: registrationId, pubkey: hexId, proof: ownerProof });
+const browserReturn = { callback: z.string().max(256).refine(localCallback), receipt: opaque.optional() };
 const member = base.extend(selected.shape);
 const multiple = base.extend({ members: z.array(selected).min(1).max(8).refine(rows =>
   new Set(rows.map(row => row.id)).size === rows.length) });
 const input = z.discriminatedUnion("step", [
   base.extend({ step: z.literal("list") }),
   multiple.extend({ step: z.literal("batch-approve") }),
-  multiple.extend({ step: z.literal("batch-start"), callback: z.string().max(256).refine(localCallback) }),
+  multiple.extend({ step: z.literal("batch-start"), ...browserReturn }),
   multiple.extend({ step: z.literal("batch-finish"), attempt: opaque, code: z.string().regex(/^[A-Za-z0-9_-]{1,2048}$/) }),
   member.extend({ step: z.literal("approve") }),
-  member.extend({ step: z.literal("start"), callback: z.string().max(256).refine(localCallback) }),
+  member.extend({ step: z.literal("start"), ...browserReturn }),
   member.extend({ step: z.literal("finish"), attempt: opaque, code: z.string().regex(/^[A-Za-z0-9_-]{1,2048}$/) }),
 ]);
 
@@ -81,6 +101,7 @@ export async function handleDesktop(request: Request, agents: Map<string, Agent>
     const token = request.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9_-]{43})$/)?.[1];
     if (!token) return reply({ error: "Open your Vercel invitation." }, 403);
     const raw = await readJson(request).catch(() => null);
+    if (z.object({ step: z.literal("receipt") }).safeParse(raw).success) return await readReceipt(token, state);
     const issuance = z.object({ step: z.literal("invite"), id: registrationId, all: z.boolean().default(false) }).safeParse(raw);
     if (issuance.success) {
       if (!hexId.safeParse(operatorDigest).success || !timingSafeEqual(Buffer.from(digest(token), "hex"),
@@ -160,7 +181,19 @@ export async function handleDesktop(request: Request, agents: Map<string, Agent>
       const attempt = handle();
       const session: Attempt = { member: selection, handoff: digest(token), verifier: handle(),
         expiresAt: Math.min(invite.expiresAt, Date.now() + 5 * 60_000) };
-      if (!await state.create(pathFor("attempts", attempt), session, 1)) throw new Error("Could not start sign-in");
+      const attemptPath = pathFor("attempts", attempt);
+      if (body.receipt) {
+        if (token === body.receipt) return reply({ error: "Restart sign-in in Buzz." }, 400);
+        const rows = await Promise.all(jobs.map(async ({ agent, approved }) => {
+          const profile = await services.profile(agent.credentialConnector!).catch(() => ({ name: agent.id }));
+          return { ...profile, ...(approved ? {} : { grantPath: desktopGrantPath(agent) }) };
+        }));
+        const receipt: Receipt = { attemptPath, agents: rows, signInExpiresAt: session.expiresAt,
+          expiresAt: Math.min(invite.expiresAt, Date.now() + 10 * 60_000) };
+        if (!await state.create(pathFor("receipts", body.receipt), receipt, 1)) return reply({ error: "Restart sign-in in Buzz." }, 409);
+        session.hasReceipt = true;
+      }
+      if (!await state.create(attemptPath, session, 1)) throw new Error("Could not start sign-in");
       return reply({ attempt, url: loginUrl(adapter, body.callback, session.verifier) });
     }
     const path = pathFor("attempts", body.attempt);
@@ -170,12 +203,18 @@ export async function handleDesktop(request: Request, agents: Map<string, Agent>
       return reply({ error: "This sign-in expired. Try again in Buzz." }, 409);
     }
     // The human session exists for this request only. Each opted-in agent gets its own grant.
-    const session = await services.exchange(adapter, body.code, attempt.value.verifier);
-    const results = await Promise.allSettled(pending.map(async job => {
-      await issueDesktopGrant(job.agent, job.key, state, () =>
-        services.enroll(adapter, session, Buffer.from(job.key).toString("hex"), job.proof));
-      log("info", "buzz_desktop_authorized", { registrationId: job.agent.id });
-    }));
+    let results;
+    try {
+      const session = await services.exchange(adapter, body.code, attempt.value.verifier);
+      results = await Promise.allSettled(pending.map(async job => {
+        await issueDesktopGrant(job.agent, job.key, state, () =>
+          services.enroll(adapter, session, Buffer.from(job.key).toString("hex"), job.proof));
+        log("info", "buzz_desktop_authorized", { registrationId: job.agent.id });
+      }));
+    } finally {
+      if (attempt.value.hasReceipt) await state.write(path, { used: true, finished: true }, 1)
+        .catch(error => log("warn", "buzz_desktop_receipt_update_failed", { error: errorName(error) }));
+    }
     const failed = pending.filter((_, index) => results[index].status === "rejected").map(job => job.agent.id);
     if (failed.length) {
       for (const result of results) if (result.status === "rejected") {

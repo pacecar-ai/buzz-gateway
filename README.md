@@ -12,6 +12,10 @@ Choose **Connect** for one agent or **Connect all** for the displayed group. Buz
 
 Reopen **Settings → Plugins → Vercel** to see agents in the selected community. **Manage in Vercel** opens the individual connector. After a name or portrait change, open the team invitation, refresh the connectors and choose **Update profile in Buzz** if the hosted listing has an older profile.
 
+After browser sign-in, the gateway shows the approval for each selected agent and a **Return to Buzz** button. The browser receives a ten-minute read-only receipt. The sign-in code stays with Buzz Desktop. To update an existing plugin, open `/connect/?update=1` on your gateway and choose **Review plugin update**. Existing agent approvals carry over.
+
+The setup and return pages use the [Buzz app icon](https://github.com/block/buzz-app/tree/v1.0.2/public) under Apache-2.0 and [Inter](https://github.com/rsms/inter) under the SIL Open Font License. The licenses accompany the assets in `public/connect/assets`.
+
 The desktop plugin uses Buzz’s hosted-agent provider, owner-signed roster and normal plugin install review. The install link pins the package’s exact SHA-256 digest. Automatic sign-in return uses a fixed Node.js process with a temporary OS-assigned loopback port on the computer running Buzz. If Node is unavailable, Buzz can still create the ownership proof and accept the browser return address in the plugin. [Buzz plugin installation](https://github.com/block/buzz-app/blob/main/docs/deep-links.md) · [Buzz hosted agents](https://github.com/block/buzz-app/blob/v1.0.2/src/features/agents/service.ts#L4110-L4195)
 
 ## Architecture
