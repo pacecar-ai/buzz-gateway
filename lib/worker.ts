@@ -6,6 +6,7 @@ import { postToProject } from "./auth.ts";
 import { actionEvent, inboundMessage, roomDirectness } from "./buzz.ts";
 import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
 import type { Agent } from "./config.ts";
+import { readConnectProfile } from "./connect-profile.ts";
 import { CredentialRefusedError, loadSigner, type Signer } from "./credentials.ts";
 import { errorName, log } from "./log.ts";
 import { readRooms, relaySigningKey, sameRooms, type BuzzRooms } from "./memberships.ts";
@@ -22,7 +23,12 @@ const issuerEpoch = () => Math.floor(Date.now() / 1000);
 const reconcileSchema = z.object({ kind: z.literal("reconcile"), registrationId, namespace: hexId, eventId: hexId });
 const incoming = z.discriminatedUnion("kind", [z.object({ kind: z.literal("message"), delivery: deliverySchema }), reconcileSchema]);
 type Lease = { owner: string; expiresAt: number };
-type LiveAgent = { socket: BuzzSocket; lease: Lease; membership?: { relayKey: string; rooms: BuzzRooms } };
+type LiveAgent = {
+  socket: BuzzSocket;
+  lease: Lease;
+  membership?: { relayKey: string; rooms: BuzzRooms };
+  publishedProfile?: string;
+};
 type PublishedAction = { event?: Event; published?: boolean; rejected?: boolean };
 type WorkerQueue = Pick<GatewayQueue, "poll" | "sendDelivery" | "sendReconciliation">;
 
@@ -186,16 +192,9 @@ export class GatewayWorker {
         if (stored && highWater - lastSaved >= 30) await save();
       }, async () => { stored = true; await save(); });
       log("info", "relay_authenticated", { registrationId: agent.id, rooms: channels.length });
-      if (agent.profile) {
-        // The optional configuration makes the gateway the publisher for this agent's profile.
-        const profile = JSON.stringify({
-          name: agent.profile.name,
-          display_name: agent.profile.name,
-          about: agent.profile.description,
-          picture: agent.profile.picture,
-        });
-        await socket.publish(signer.sign({ kind: 0, tags: [], content: profile, created_at: issuerEpoch() }));
-        await socket.publish(signer.sign({ kind: 10100, tags: [], content: profile, created_at: issuerEpoch() }));
+      if (agent.profile) await this.#publishProfile(active, agent.profile);
+      if (agent.profileFromConnector && agent.credentialConnector) {
+        await this.#refreshConnectProfile(active, agent.credentialConnector);
       }
       await this.#presence(agent, socket, "online");
       await socket.closed;
@@ -227,8 +226,34 @@ export class GatewayWorker {
         }
       }
       ticks += 1;
-      if (ticks % 4 === 0 && this.#active.get(agent.id) === active) await this.#presence(agent, active.socket, "online");
+      if (this.#active.get(agent.id) !== active) continue;
+      if (ticks % 4 === 0) await this.#presence(agent, active.socket, "online");
+      if (ticks % 20 === 0 && agent.profileFromConnector && agent.credentialConnector) {
+        await this.#refreshConnectProfile(active, agent.credentialConnector);
+      }
     }
+  }
+
+  async #refreshConnectProfile(active: LiveAgent, connector: string): Promise<void> {
+    try {
+      const profile = await readConnectProfile(connector);
+      if (this.#isLive(active)) await this.#publishProfile(active, profile);
+    } catch (error) {
+      log("warn", "buzz_profile_sync_failed", { registrationId: active.socket.agent.id, error: errorName(error) });
+    }
+  }
+
+  async #publishProfile(active: LiveAgent, profile: { name: string; description?: string; picture?: string }): Promise<void> {
+    const content = JSON.stringify({
+      name: profile.name, display_name: profile.name, about: profile.description, picture: profile.picture,
+    });
+    if (content === active.publishedProfile) return;
+    const { socket } = active;
+    const created_at = issuerEpoch();
+    await socket.publish(socket.signer.sign({ kind: 0, tags: [], content, created_at }));
+    await socket.publish(socket.signer.sign({ kind: 10100, tags: [], content, created_at }));
+    active.publishedProfile = content;
+    log("info", "buzz_profile_published", { registrationId: socket.agent.id });
   }
 
   async #presence(agent: Agent, socket: BuzzSocket, status: "online"): Promise<void> {

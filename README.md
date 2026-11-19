@@ -75,11 +75,15 @@ Use your projects' Vercel production origins. If the eve deployment is protected
 
 For an agent that needs additional application-level authorization, pass `authorizeDelivery` to `createBuzzChannel`. The gateway supplies the community origin, room ID, verified sender public key, and whether the room is a DM. The channel applies the policy before starting a turn and when reconciling a reply.
 
-### Use Vercel Connect for callbacks
+### Give each agent its own Vercel connector
 
-Create a [Vercel Connect API Key connector](https://vercel.com/connect/api-key) named `buzz-gateway` using your gateway's hostname as the service. Generate a random 32-byte callback key, enter its hex representation as the connector's API key, and attach the connector to the consuming eve projects' Production environments. Set `BUZZ_GATEWAY_ACTION_KEY_SHA256` to the lowercase hex SHA-256 hash of that exact key string in the gateway's Production environment, then redeploy.
+Create one [Vercel Connect API Key connector](https://vercel.com/connect/api-key) per Buzz agent. Set the agent's name and portrait in Connect and link that connector to its eve project and the gateway project in Production. When you set `profileFromConnector: true` on the gateway registration, the gateway publishes the connector's name and logo to Buzz and checks for edits every few minutes.
 
-In the eve project, install `@vercel/connect`, set `BUZZ_GATEWAY_CONNECTOR` to the UID shown by Vercel Connect, and pass the key resolver to `createBuzzChannel` alongside the origin and project identity.
+Vercel requires connector names to be unique within a team. Add a trailing ` · Buzz` if another connector already uses the name. The gateway omits that suffix from the agent's Buzz name.
+
+Use the agent credential from the authorization step below as the connector's API key. To create the connector before authorization, start with a JSON API key containing a random 32-byte hex `actionKey` and fill in the Buzz grant and signing key after approval. Set `actionKeyDigest` on the gateway registration to the lowercase hex SHA-256 hash of the action key string.
+
+In the eve project, install `@vercel/connect`, set `BUZZ_GATEWAY_CONNECTOR` to this agent's connector ID or UID, and pass the key resolver to `createBuzzChannel`.
 
 ```ts
 import { getToken } from "@vercel/connect";
@@ -91,11 +95,14 @@ if (!connector) throw new Error("Set BUZZ_GATEWAY_CONNECTOR to the connector UID
 export default createBuzzChannel({
   gatewayUrl: process.env.BUZZ_GATEWAY_ORIGIN ?? "",
   gatewayProject: JSON.parse(process.env.BUZZ_GATEWAY_PROJECT ?? "{}"),
-  actionKey: () => getToken(connector, { subject: { type: "app" } }),
+  actionKey: async () => {
+    const { actionKey } = JSON.parse(await getToken(connector, { subject: { type: "app" } }));
+    return actionKey;
+  },
 });
 ```
 
-The gateway requires the configured callback key alongside the agent project's OIDC identity. The daemon continues to sign Buzz events with each registration's own key.
+The gateway verifies the agent project's OIDC identity and its callback key. `BUZZ_GATEWAY_ACTION_KEY_SHA256` supplies a gateway-wide default for registrations that have no `actionKeyDigest`.
 
 ### Authorize in Buzz
 
@@ -105,7 +112,7 @@ Use a dedicated agent identity for each community installation. For communities 
 node scripts/enroll.ts https://identity.example.com/adapter example-agent
 ```
 
-After signing in and authorizing the generated public key, create a [Vercel Connect API Key connector](https://vercel.com/connect/api-key) with your relay's hostname in the identifier. Use the `values[0].value` field of the enrollment file as the API key in the dashboard, or pass the file to the Connect API with the gateway project ID.
+After signing in and authorizing the generated public key, use the `data.values[0].value` field of the enrollment file as the API key in the agent's connector. To create the connector from the file, pass it to the Connect API with your gateway project ID.
 
 ```sh
 jq --arg projectId prj_example '. + {
@@ -115,13 +122,11 @@ jq --arg projectId prj_example '. + {
   vercel api /v1/connect/connectors -X POST --input -
 ```
 
-Attach each identity credential to the gateway's Production environment. Remove the temporary credential files after the connector is linked. The daemon exchanges each grant for a short-lived assertion for its registered relay and renews the assertion on reconnect. If a grant expires or is revoked, enroll again through the identity adapter. The credential value contains a signing key and the adapter's agent grant in the fields `signingKey` and `federated: { grant, issuer, ownerPubkey }`.
-
-To use one connector for a specific agent's identity and replies, link it to that agent's eve Production project as well. Read its JSON `actionKey` in the eve adapter's `actionKey` callback. Put the SHA-256 digest of that value in the registration's `actionKeyDigest`. This digest takes precedence over the gateway-wide callback digest.
+Remove the temporary credential files after saving each key in Connect. The daemon exchanges each grant for a short-lived assertion for its registered relay and renews the assertion on reconnect. If a grant expires or is revoked, enroll again through the identity adapter. The credential value contains `signingKey`, `actionKey`, and `federated: { grant, issuer, ownerPubkey }`.
 
 #### Authorize from another computer
 
-To offer links hosted by your gateway, set the Production variable `BUZZ_GATEWAY_ENROLLMENT` for a short setup window. Supply the gateway HTTPS `origin`, Buzz identity `adapter` base URL, expected `ownerPubkey`, an `expiresAt` timestamp in epoch milliseconds, and an `operatorDigest`. For each entry in `agents`, supply `id`, `name`, optional HTTPS `picture`, and `inviteDigest`. Generate a separate random 32-byte base64url token for each invitation and another for operator access. Store their SHA-256 digests in the plan. Redeploy.
+To offer links hosted by your gateway, set the Production variable `BUZZ_GATEWAY_ENROLLMENT` for a short setup window. Supply the gateway HTTPS `origin`, Buzz identity `adapter` base URL, expected `ownerPubkey`, an `expiresAt` timestamp in epoch milliseconds, and an `operatorDigest`. For each entry in `agents`, supply `id`, `inviteDigest`, and a Production-linked `connectorId` for its name and logo. You can also supply `name` and an optional HTTPS `picture` directly. Generate a separate random 32-byte base64url token for each invitation and another for operator access. Store their SHA-256 digests in the plan. Redeploy.
 
 Send the owner `<origin>/api/enroll#<agent-id>.<invite-token>`. The page shows the agent key to authorize in Buzz Desktop and starts Builderlab sign-in. When the browser returns to the loopback address, the owner pastes that address into the setup page. The gateway exchanges its single-use code with Buzz.
 
@@ -139,6 +144,8 @@ Set `BUZZ_GATEWAY_AGENTS` as a JSON array in the gateway's Production environmen
     "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "credentialConnector": "buzz.example.com/example-agent",
     "federatedIdentityAdapter": "https://identity.example.com/adapter",
+    "profileFromConnector": true,
+    "actionKeyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "eveUrl": "https://agent.example.com",
     "eveProject": {
       "teamSlug": "example-team",

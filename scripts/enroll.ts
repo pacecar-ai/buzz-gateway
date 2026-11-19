@@ -95,7 +95,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         federated: await enrollAgent(base.href, session, signingKey, proof),
       };
       await writeFile(join(folder, `${agent.id}.json`), JSON.stringify({
-        values: [{ key: "apiKey", value: JSON.stringify(credential) }],
+        data: { values: [{ value: JSON.stringify(credential) }] },
       }), { mode: 0o600, flag: "wx" });
       agent.complete = true;
       console.log(`Grant issued for ${agent.id} (${agent.pubkey}).`);

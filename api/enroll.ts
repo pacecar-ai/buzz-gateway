@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { z } from "zod";
+import { readConnectProfile } from "../lib/connect-profile.ts";
 import { enrollAgent, EnrollmentRefused, exchangeLogin, loginUrl, ownerProof } from "../lib/enrollment.ts";
 import { enrollmentPage } from "../lib/enrollment-page.ts";
 import { errorName, log } from "../lib/log.ts";
@@ -11,9 +12,11 @@ const https = z.url({ protocol: /^https$/ }).refine(value => {
   const url = new URL(value);
   return !url.username && !url.password && !url.search && !url.hash;
 });
-const entry = z.object({
-  id: registrationId, name: z.string().min(1).max(80), picture: https.optional(), inviteDigest: hexId,
-});
+const baseEntry = z.object({ id: registrationId, inviteDigest: hexId });
+const entry = z.union([
+  baseEntry.extend({ connectorId: z.string().regex(/^scl_[a-zA-Z0-9]+$/) }),
+  baseEntry.extend({ name: z.string().min(1).max(80), picture: https.optional() }),
+]);
 const planSchema = z.object({
   origin: https.refine(value => new URL(value).origin === value),
   adapter: https,
@@ -88,8 +91,9 @@ export async function handleEnrollment(request: Request, configuration: string |
 
     const draft = await getDraft(state, path);
     const { pubkey, signingKey, grant, collected, lockedUntil, attempt } = draft.value;
-    const profile = { name: agent.name, picture: agent.picture, pubkey, authorized: Boolean(grant || collected) };
-    if (step === "view" || grant || collected) return reply(profile);
+    if (step === "view" || grant || collected) {
+      return reply({ ...await profileOf(agent), pubkey, authorized: Boolean(grant || collected) });
+    }
     if (lockedUntil && lockedUntil > Date.now()) return reply({ error: "An authorization is already in progress." }, 409);
     if (step === "start") {
       const next = {
@@ -113,6 +117,7 @@ export async function handleEnrollment(request: Request, configuration: string |
     if (!proof || proof[1] !== plan.data.ownerPubkey || !signingKey) {
       return reply({ error: "Go back and paste the ownership proof from the Buzz identity this invite was issued to." }, 400);
     }
+    const profile = await profileOf(agent);
     const held = { ...draft.value, lockedUntil: Date.now() + 30_000 };
     if (!await state.replace(path, held, draft.etag, 1)) return reply({ error: "Try again." }, 409);
     const locked = await state.read<Draft>(path);
@@ -123,7 +128,7 @@ export async function handleEnrollment(request: Request, configuration: string |
       const completed = { ...draft.value, grant: issued, attempt: undefined, lockedUntil: undefined };
       if (!await state.replace(path, completed, locked.etag, 1)) throw new Error("Enrollment record changed");
       log("info", "buzz_enrollment_authorized", { registrationId: id });
-      return reply({ ...profile, authorized: true });
+      return reply({ ...profile, pubkey, authorized: true });
     } catch (error) {
       await state.replace(path, { ...draft.value, attempt: undefined, lockedUntil: undefined }, locked.etag, 1);
       log("warn", "buzz_enrollment_refused", {
@@ -136,6 +141,11 @@ export async function handleEnrollment(request: Request, configuration: string |
     log("warn", "buzz_enrollment_unavailable", { error: errorName(error) });
     return reply({ error: "The setup page is temporarily unavailable." }, 503);
   }
+}
+
+async function profileOf(agent: z.infer<typeof entry>) {
+  if ("connectorId" in agent) return readConnectProfile(agent.connectorId);
+  return { name: agent.name, picture: agent.picture };
 }
 
 async function getDraft(state: State, path: string): Promise<Versioned<Draft>> {

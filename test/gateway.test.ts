@@ -372,6 +372,45 @@ test("authorizes one hosted Buzz installation and keeps credentials with the ope
   assert.deepEqual(await (await post("collect", operator)).json(), { status: "collected" });
 });
 
+test("reads the current Vercel connector profile after validating the Buzz invite", async t => {
+  const origin = "https://gateway.example.com";
+  const connectorId = "scl_BuzzFixture";
+  const invite = "a".repeat(43);
+  const state = new MemoryState();
+  const config = JSON.stringify({
+    origin, adapter: "https://identity.example.com", ownerPubkey: "1".repeat(64),
+    operatorDigest: "2".repeat(64), expiresAt: Date.now() + 60_000,
+    agents: [{ id: "fixture", connectorId, inviteDigest: createHash("sha256").update(invite).digest("hex") }],
+  });
+  const oidc = await new SignJWT({}).setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt().setExpirationTime("2m").sign(new Uint8Array(32));
+  const previous = process.env.VERCEL_OIDC_TOKEN;
+  process.env.VERCEL_OIDC_TOKEN = oidc;
+  t.after(() => {
+    if (previous === undefined) delete process.env.VERCEL_OIDC_TOKEN;
+    else process.env.VERCEL_OIDC_TOKEN = previous;
+  });
+  let profile = { name: "Fixture · Buzz", icon: "3".repeat(40) };
+  const requestProfile = t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    assert.equal(url, `https://api.vercel.com/v1/connect/connectors/${connectorId}`);
+    assert.equal(new Headers(init.headers).get("authorization"), `Bearer ${oidc}`);
+    return Response.json(profile);
+  });
+  const view = (token: string) => handleEnrollment(new Request(`${origin}/api/enroll`, {
+    method: "POST",
+    headers: { origin, authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ id: "fixture", step: "view" }),
+  }), config, state);
+  assert.equal((await view("b".repeat(43))).status, 403);
+  assert.equal(requestProfile.mock.callCount(), 0);
+  const original = await (await view(invite)).json();
+  assert.equal(original.name, "Fixture");
+  assert.equal(original.picture, `https://vercel.com/api/www/avatar/${profile.icon}`);
+  profile = { name: "New fixture name", icon: "4".repeat(40) };
+  const updated = await (await view(invite)).json();
+  assert.deepEqual(updated, { ...original, name: profile.name, picture: `https://vercel.com/api/www/avatar/${profile.icon}` });
+});
+
 test("Blob and Queues read a newly rotated daemon OIDC token", async t => {
   const directory = await mkdtemp(join(tmpdir(), "buzz-oidc-fixture-"));
   const tokenPath = join(directory, "token");

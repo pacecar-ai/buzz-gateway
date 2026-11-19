@@ -29,6 +29,7 @@ export const agentSchema = z.object({
     description: z.string().max(400).default(""),
     picture: urlFor(["https:"]).optional(),
   }).optional(),
+  profileFromConnector: z.boolean().optional(),
   eveUrl: urlFor(["https:"]).refine(value => new URL(value).pathname === "/", "Expected the eve deployment origin"),
   eveProject: projectIdentity,
   actionKeyDigest: hexId.optional(),
@@ -38,6 +39,9 @@ export const agentSchema = z.object({
 }).refine(agent => Boolean(agent.signingKeyEnv) !== Boolean(agent.credentialConnector), {
   path: ["credentialConnector"],
   message: "Provide one signing credential source",
+}).refine(agent => !agent.profileFromConnector || (Boolean(agent.credentialConnector) && !agent.profile), {
+  path: ["profileFromConnector"],
+  message: "A connector supplies this profile when no profile is configured",
 }).refine(agent => !agent.ownerAttestationEnv || Boolean(agent.signingKeyEnv), {
   path: ["ownerAttestationEnv"],
   message: "An environment attestation requires an environment signing key",
