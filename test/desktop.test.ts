@@ -249,7 +249,7 @@ test("invitation, owner, identity, lease and expiry bind a desktop sign-in", asy
 
 test("the desktop helper binds a real loopback port and delivers only its one-time callback", async () => {
   const page = "https://gateway.example.org/connect/return/";
-  const source = await readFile("buzz-plugin/callback.cjs", "utf8");
+  const source = await readFile(new URL(import.meta.resolve("@pacecar-ai/buzz-vercel-plugin/callback-source")), "utf8");
   const proc = spawn(process.execPath, ["-e", source, "--", page], { stdio: ["ignore", "pipe", "pipe"] });
   const lines = createInterface({ input: proc.stdout })[Symbol.asyncIterator]();
   try {

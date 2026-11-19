@@ -1,8 +1,10 @@
 # Buzz Gateway
 
-Run an [eve](https://eve.dev/) agent as a native member of a [Buzz](https://github.com/block/buzz) community. Authorize the agent in Buzz, then add it to the channels where it should respond. The gateway carries mentions, follow-ups in joined threads, and messages in the agent's Buzz DMs. It sends signed replies, typing indicators, and optional acknowledgment reactions.
+Run an [eve](https://eve.dev/) agent as a native member of a [Buzz](https://github.com/block/buzz) community. Authorize the agent in Buzz, then add it to the channels where it should respond. The gateway carries signed mentions and direct messages. Eve Buzz can also accept follow-ups in joined threads when configured. The agent sends threaded replies, live activity, typing indicators and emoji reactions through its Buzz identity.
 
 Inspired by [eve's Discord Gateway relay](https://eve.dev/docs/channels/discord/reference#run-the-relay-as-a-vercel-daemon), originally implemented by [Ben Pankow](https://github.com/vercel/eve/pull/4934).
+
+The Eve channel and Buzz Desktop companion have their own public releases. Install the Eve package in each agent project. The gateway builds the desktop plugin from its pinned release using your gateway origin. [Eve Buzz](https://github.com/pacecar-ai/eve-buzz) · [Buzz Vercel plugin](https://github.com/pacecar-ai/buzz-vercel-plugin)
 
 ## Connect from Buzz Desktop
 
@@ -75,21 +77,24 @@ The workflow sends the checked commit to the [Vercel Deployments API](https://ve
 
 ### Install the channel
 
-From this repository, run `npm ci && npm pack`. Install the resulting `buzz-gateway-*.tgz` in the eve project with `npm install /path/to/buzz-gateway-<version>.tgz`. Commit the tarball inside the agent's repository if it needs to install from a remote build.
+Install the public Eve channel release in your agent project.
 
-Add `agent/channels/buzz.ts` to the eve project.
+```sh
+npm install https://github.com/pacecar-ai/eve-buzz/releases/download/v1.0.0/pacecar-ai-eve-buzz-1.0.0.tgz
+```
+
+Add `agent/channels/buzz.ts` to the Eve project.
 
 ```ts
-import { createBuzzChannel } from "buzz-gateway/eve";
+import { createBuzzChannel } from "@pacecar-ai/eve-buzz";
 
 export default createBuzzChannel({
-  gatewayUrl: process.env.BUZZ_GATEWAY_ORIGIN ?? "",
-  gatewayProject: JSON.parse(process.env.BUZZ_GATEWAY_PROJECT ?? "{}"),
-  acknowledgmentReaction: "👀",
+  gatewayUrl: process.env.BUZZ_GATEWAY_ORIGIN!,
+  gatewayProject: JSON.parse(process.env.BUZZ_GATEWAY_PROJECT!),
 });
 ```
 
-Set `BUZZ_GATEWAY_ORIGIN` to the gateway's HTTPS production origin and `BUZZ_GATEWAY_PROJECT` to its project identity, using the same fields as `eveProject` below. Omit `acknowledgmentReaction` for typing and replies only. Deploy the eve project. The channel adds `POST /integrations/buzz/events` and `POST /integrations/buzz/result`. Both validate the gateway's Vercel OIDC token.
+Set `BUZZ_GATEWAY_ORIGIN` to the gateway's production HTTPS origin and `BUZZ_GATEWAY_PROJECT` to its workload identity. The channel adds `POST /integrations/buzz/events` and `POST /integrations/buzz/result`. Both validate the gateway's Vercel OIDC token. Install the optional reaction tool to let the agent choose an emoji when it fits the conversation. [Eve Buzz configuration](https://github.com/pacecar-ai/eve-buzz#install)
 
 Use your projects' Vercel production origins. If the eve deployment is protected, add the gateway as a [Trusted Source](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/trusted-sources) on the eve project with a Production-to-Production rule. If the gateway deployment is protected, give the eve project the corresponding rule on the gateway. The gateway and channel send the OIDC token in the Trusted Sources header as well as the application authorization header.
 
@@ -107,7 +112,7 @@ In the eve project, install `@vercel/connect`, set `BUZZ_GATEWAY_CONNECTOR` to t
 
 ```ts
 import { getToken } from "@vercel/connect";
-import { createBuzzChannel } from "buzz-gateway/eve";
+import { createBuzzChannel } from "@pacecar-ai/eve-buzz";
 
 const connector = process.env.BUZZ_GATEWAY_CONNECTOR;
 if (!connector) throw new Error("Set BUZZ_GATEWAY_CONNECTOR to the connector UID");

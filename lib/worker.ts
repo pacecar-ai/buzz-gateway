@@ -375,11 +375,11 @@ export class GatewayWorker {
       if (signal.aborted) return;
       await Promise.all([...this.#typing].map(async ([key, { agent, record, expires }]) => {
         const active = this.#active.get(agent.id);
-        if (!active || expires < Date.now() || !this.#isLive(active) || !this.#deliveryAllowed(agent, record)) {
-          this.#typing.delete(key);
-          return;
-        }
         try {
+          if (!active || expires < Date.now() || !this.#isLive(active) || !this.#deliveryAllowed(agent, record)) {
+            this.#typing.delete(key);
+            return;
+          }
           const draft = actionEvent({ ...record.delivery, kind: "typing" }, record.target, Date.now());
           await active.socket.publish(active.socket.signer.sign(draft));
         } catch (error) {

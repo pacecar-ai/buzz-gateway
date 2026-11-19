@@ -73,6 +73,7 @@ export default {
         return { id: event.id, roomId, at: event.created_at, mentioned: event.tags.some(t => t[0] === "p" && t[1] === agent.pubkey),
           routable: Boolean(inboundMessage(agent, event, eligible)), queued: Boolean(record), admitted: Boolean(record?.value.receipt), completed: Boolean(record?.value.completed),
           delivered: replies.some(reply => reply.pubkey === agent.pubkey && reply.kind === 9 &&
+            !reply.tags.some(tag => tag[0] === "audience" && tag[1] === "agents") &&
             reply.tags.some(tag => tag[0] === "h" && tag[1] === roomId) && reply.tags.some(tag => tag[0] === "e" && tag[1] === event.id)) };
       }));
       return reply({ rooms: summary, messages: messages.filter(Boolean) });

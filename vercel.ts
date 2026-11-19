@@ -7,7 +7,7 @@ if (!region || !/^[a-z]{3}\d$/.test(region)) {
 
 export const config = {
   git: { deploymentEnabled: false },
-  buildCommand: "node scripts/build-plugin.mjs",
+  buildCommand: "npm run build:plugin",
   outputDirectory: "public",
   regions: [region],
   daemons: {
