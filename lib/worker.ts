@@ -8,7 +8,7 @@ import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
 import type { Agent } from "./config.ts";
 import { errorName, log } from "./log.ts";
 import {
-  actionId, actionJobSchema, deliveryPath, deliverySchema, eveDeliveryPath, eveResultPath, healthPath,
+  actionId, actionJobSchema, deliveryPath, deliverySchema, deliveryStatusHeader, eveDeliveryPath, eveResultPath, healthPath,
   hexId, inboxTopic, outboxTopic, receiptRetentionDays, receiptSchema, registrationId, typingLifetimeMs,
 } from "./protocol.ts";
 import type { GatewayQueue } from "./queue.ts";
@@ -233,9 +233,17 @@ export class GatewayWorker {
     const path = deliveryPath(reference);
     const record = await this.#state.read<DeliveryRecord>(path);
     if (!record || record.value.completed || !deliveryAllowed(agent, record.value)) return;
+    const location = { community: new URL(agent.relayUrl).origin, roomId: record.value.target.channelId };
+    const settleDenied = async (response: Response): Promise<boolean> => {
+      if (response.status !== 403 || response.headers.get(deliveryStatusHeader) !== "denied") return false;
+      await updateDelivery(this.#state, path, current => ({ ...current, completed: true }));
+      log("info", "eve_delivery_denied", { registrationId: agent.id, eventId: reference.eventId });
+      return true;
+    };
     if (job.kind === "reconcile") {
       if (!record.value.receipt) throw new Error("Waiting for eve delivery receipt");
-      const response = await this.#post(agent.eveUrl, eveResultPath, { ...record.value.delivery, receipt: record.value.receipt });
+      const response = await this.#post(agent.eveUrl, eveResultPath, { ...record.value.delivery, ...location, receipt: record.value.receipt });
+      if (await settleDenied(response)) return;
       if (response.status !== 200) {
         log(response.status === 202 ? "debug" : "warn", "eve_result_retry", {
           registrationId: agent.id, eventId: reference.eventId, status: response.status,
@@ -247,7 +255,8 @@ export class GatewayWorker {
       return;
     }
     if (!record.value.receipt) {
-      const response = await this.#post(agent.eveUrl, eveDeliveryPath, job.delivery);
+      const response = await this.#post(agent.eveUrl, eveDeliveryPath, { ...job.delivery, ...location });
+      if (await settleDenied(response)) return;
       if (response.status !== 202) {
         log("warn", "eve_delivery_retry", { registrationId: agent.id, eventId: reference.eventId, status: response.status });
         throw new Error("eve admission unavailable");

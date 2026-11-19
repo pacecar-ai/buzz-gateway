@@ -72,6 +72,8 @@ Set `BUZZ_GATEWAY_ORIGIN` to the gateway's HTTPS production origin and `BUZZ_GAT
 
 Use your projects' Vercel production origins. If the eve deployment is protected, add the gateway as a [Trusted Source](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/trusted-sources) on the eve project with a Production-to-Production rule. If the gateway deployment is protected, give the eve project the corresponding rule on the gateway. The gateway and channel send the OIDC token in the Trusted Sources header as well as the application authorization header.
 
+To enforce the agent project's own access policy, pass `authorizeDelivery` to `createBuzzChannel`. The gateway supplies the community as the origin of the configured Buzz relay, the room ID from the signed event, the sender's verified public key, and whether the room is a DM. The channel applies the policy before starting a turn and again when reconciling a reply. Approve exact community origins and private rooms and require an explicit sender list for DMs.
+
 ### Use Vercel Connect for callbacks
 
 Create a [Vercel Connect API Key connector](https://vercel.com/connect/api-key) named `buzz-gateway` using your gateway's hostname as the service. Generate a random 32-byte callback key, enter its hex representation as the connector's API key, and attach the connector to the consuming eve projects' Production environments. Set `BUZZ_GATEWAY_ACTION_KEY_SHA256` to the lowercase hex SHA-256 hash of that exact key string in the gateway's Production environment, then redeploy.
@@ -96,7 +98,7 @@ The gateway requires the configured callback key alongside the agent project's O
 
 ### Register the Buzz identity
 
-Provision a dedicated Buzz agent identity on your relay and grant it access to the rooms it should answer in. Set the signing key (64-character lowercase hex or `nsec`) as a Production Secret named in `signingKeyEnv`. Where the relay grants the identity access via an owner attestation, set `ownerAttestationEnv` to the name of a second secret containing the signed JSON `["auth", ownerPubkey, expiration, signature]` tag. For information on relay access and events, see [Buzz's Nostr protocol reference](https://github.com/block/buzz/blob/main/NOSTR.md).
+Provision a dedicated Buzz agent identity on your relay and grant it access to the rooms it should answer in. Set the signing key (64-character lowercase hex or `nsec`) as a Production Secret named in `signingKeyEnv`. Where the relay grants the identity access via an owner attestation, set `ownerAttestationEnv` to the name of a second secret containing the signed JSON `["auth", ownerPubkey, conditions, signature]` tag. For information on relay access and events, see [Buzz's Nostr protocol reference](https://github.com/block/buzz/blob/main/NOSTR.md).
 
 Set `BUZZ_GATEWAY_AGENTS` as a JSON array in the gateway's Production environment. Replace the example identifiers and URLs with values from your relay and deployment.
 

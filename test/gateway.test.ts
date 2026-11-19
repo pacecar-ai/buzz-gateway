@@ -176,6 +176,8 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     assert.equal(admissions.length, 1);
     assert.equal(admissions[0].eventId, question.id);
     assert.equal(admissions[0].text, question.content);
+    assert.equal(admissions[0].community, new URL(relayUrl).origin);
+    assert.equal(admissions[0].roomId, "test-room");
     assert(reconciled);
     assert(await state.read(healthPath));
     assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: unauthorizedRoom.id })), null);

@@ -4,9 +4,12 @@ import { z } from "zod";
 import { fromProject, postToProject } from "../../lib/auth.ts";
 import { errorName, log } from "../../lib/log.ts";
 import {
-  actionPath, deliveryReferenceSchema, deliverySchema, eveDeliveryPath, eveResultPath,
+  actionPath, deliveryReferenceSchema, deliverySchema, deliveryStatusHeader, eveDeliveryPath, eveResultPath,
   projectIdentity, readJson, receiptSchema, stableId, type Action, type Delivery, type EveReceipt,
 } from "../../lib/protocol.ts";
+
+export type BuzzDeliveryAccess = Pick<Delivery, "community" | "roomId" | "author" | "direct">;
+export { eveDeliveryPath, eveResultPath };
 
 const optionsSchema = z.object({
   gatewayUrl: z.url().refine(value => {
@@ -15,6 +18,7 @@ const optionsSchema = z.object({
       && !url.search && !url.hash;
   }, "Expected the HTTPS origin of the Buzz Gateway project"),
   gatewayProject: projectIdentity,
+  authorizeDelivery: z.custom<(delivery: BuzzDeliveryAccess) => boolean>(value => typeof value === "function").optional(),
   actionKey: z.custom<() => Promise<string>>(value => typeof value === "function").optional(),
   acknowledgmentReaction: z.string().trim().min(1).max(24).optional(),
 });
@@ -26,6 +30,12 @@ export type BuzzChannelOptions = z.input<typeof optionsSchema>;
 
 export function createBuzzChannel(input: BuzzChannelOptions) {
   const options = optionsSchema.parse(input);
+  function accessDenied({ community, roomId, author, direct }: BuzzDeliveryAccess): Response | undefined {
+    if (options.authorizeDelivery?.({ community, roomId, author, direct }) === false) {
+      return new Response(null, { status: 403, headers: { [deliveryStatusHeader]: "denied" } });
+    }
+  }
+
   async function publish(reference: Reference, output: ResponseAction): Promise<void> {
     const { registrationId, namespace, eventId } = reference;
     const action: Action = { version: 1, registrationId, namespace, eventId, ...output };
@@ -47,6 +57,8 @@ export function createBuzzChannel(input: BuzzChannelOptions) {
         const parsed = deliverySchema.safeParse(input);
         if (!parsed.success) return new Response(null, { status: 400 });
         const message = parsed.data;
+        const denied = accessDenied(message);
+        if (denied) return denied;
         const receipt = await from(message.conversationId).send(`${marker(message)}\n${message.text}`, {
           auth: {
             authenticator: "buzz-gateway",
@@ -75,6 +87,8 @@ export function createBuzzChannel(input: BuzzChannelOptions) {
         const parsed = resultRequest.safeParse(input);
         if (!parsed.success) return new Response(null, { status: 400 });
         const message = parsed.data;
+        const denied = accessDenied(message);
+        if (denied) return denied;
         const result = await recordedReply(attachSession(message.receipt.sessionId), message, message.receipt,
           AbortSignal.any([request.signal, AbortSignal.timeout(6500)]));
         if (!result.settled) return new Response(null, { status: 202 });

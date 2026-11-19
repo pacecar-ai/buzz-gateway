@@ -18,6 +18,8 @@ export const deliverySchema = z.object({
   namespace: hexId,
   eventId: hexId,
   conversationId: hexId,
+  community: z.url().optional(),
+  roomId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
   author: hexId,
   direct: z.boolean(),
   text: z.string().min(1).max(16000),
@@ -48,6 +50,7 @@ export const receiptRetentionDays = 2;
 export const typingLifetimeMs = 10_000;
 export const eveDeliveryPath = "/integrations/buzz/events";
 export const eveResultPath = "/integrations/buzz/result";
+export const deliveryStatusHeader = "x-buzz-delivery-status";
 export const actionPath = "/api/actions";
 export const actionKeyHeader = "x-buzz-gateway-key";
 export const healthPath = "gateway/daemon-health.json";
