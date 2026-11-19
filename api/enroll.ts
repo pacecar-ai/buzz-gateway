@@ -103,9 +103,15 @@ export async function handleEnrollment(request: Request, configuration: string |
       return reply({ url: loginUrl(plan.data.adapter, next.callback, next.verifier) });
     }
 
-    const code = attempt && attempt.expiresAt > Date.now() && redirect ? readCode(redirect, attempt.callback) : undefined;
-    if (!code || !proof || proof[1] !== plan.data.ownerPubkey || !attempt || !signingKey) {
-      return reply({ error: "Use the full return address and the ownership proof from the Buzz identity this link was issued to." }, 400);
+    if (!attempt || attempt.expiresAt <= Date.now()) {
+      return reply({ error: "That sign-in expired. Restart sign-in to get a new return address." }, 400);
+    }
+    const code = redirect && readCode(redirect, attempt.callback);
+    if (!code) {
+      return reply({ error: "Paste the full return address from this sign-in attempt." }, 400);
+    }
+    if (!proof || proof[1] !== plan.data.ownerPubkey || !signingKey) {
+      return reply({ error: "Go back and paste the ownership proof from the Buzz identity this invite was issued to." }, 400);
     }
     const held = { ...draft.value, lockedUntil: Date.now() + 30_000 };
     if (!await state.replace(path, held, draft.etag, 1)) return reply({ error: "Try again." }, 409);
