@@ -7,7 +7,6 @@ if (!region || !/^[a-z]{3}\d$/.test(region)) {
 
 export const config = {
   git: { deploymentEnabled: false },
-  buildCommand: "mkdir -p public",
   outputDirectory: "public",
   regions: [region],
   daemons: {
