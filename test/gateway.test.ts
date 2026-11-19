@@ -227,7 +227,7 @@ async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
         name: profile.name, display_name: profile.name, about: profile.description, picture: profile.picture,
       });
     }
-    assert.deepEqual(event.tags, [["h", "test-room"], ["e", question.id, "", "reply"], ["p", question.pubkey]]);
+    assert.deepEqual(event.tags, [["h", "test-room"], ["e", question.id, "", "reply"], ["p", question.pubkey], ["buzz:request", question.id]]);
     for (let i = 0; i < 30 && !logs.mock.calls.some(call => call.arguments[0].includes("buzz_action_published")); i += 1) {
       await pause(20);
     }

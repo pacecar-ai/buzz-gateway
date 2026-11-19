@@ -44,30 +44,34 @@ export function inboundMessage(agent: Agent, event: Event, membership?: BuzzRoom
   const rootId = root ?? (direct ? null : event.id);
   // Trim the message while leaving user content and platform context as separate fields.
   const text = event.content.trim();
+  const mentioned = event.tags.some(tag => tag[0] === "p" && tag[1] === agent.pubkey);
   const parsed = deliverySchema.safeParse({
     version: 1, registrationId: agent.id, namespace: agent.namespace, eventId: event.id,
     conversationId: stableId(agent.namespace, channelId, direct ? "direct" : rootId ?? event.id),
-    author: event.pubkey, direct, text,
+    author: event.pubkey, direct, mentioned, visibility: membership?.get(channelId)?.visibility, text,
   });
   if (!parsed.success) return;
   return {
     delivery: parsed.data,
     target: { channelId, rootId, author: event.pubkey, sourceEventId: event.id },
-    addressed: direct || event.tags.some(tag => tag[0] === "p" && tag[1] === agent.pubkey),
+    addressed: direct || mentioned,
   };
 }
 
-export function actionEvent(action: Action, target: Target, queuedAt: number): EventTemplate {
+export function actionEvent(action: Exclude<Action, { kind: "status" }>, target: Target, queuedAt: number): EventTemplate {
   const created_at = Math.floor(queuedAt / 1000);
   const tags = [["h", target.channelId]];
   if (action.kind === "reaction") {
     return {
       kind: 7, created_at, content: action.emoji,
-      tags: [["e", target.sourceEventId], ["p", target.author], ["k", "9"]],
+      tags: [...tags, ["e", target.sourceEventId], ["p", target.author], ["k", "9"]],
     };
   }
-  if (target.rootId) tags.push(["e", target.rootId, "", "reply"]);
-  if (action.kind === "typing") return { kind: 20002, created_at, tags, content: "" };
-  tags.push(["p", target.author]);
+  if (action.kind === "typing") {
+    if (target.rootId) tags.push(["e", target.rootId, "", "reply"]);
+    return { kind: 20002, created_at, tags, content: "" };
+  }
+  if (target.rootId && target.sourceEventId !== target.rootId) tags.push(["e", target.rootId, "", "root"]);
+  tags.push(["e", target.sourceEventId, "", "reply"], ["p", target.author], ["buzz:request", target.sourceEventId]);
   return { kind: 9, created_at, tags, content: action.text };
 }

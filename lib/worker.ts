@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Event } from "nostr-tools/pure";
 import { z } from "zod";
 import { postToProject } from "./auth.ts";
+import { publishActivity } from "./activity.ts";
 import { actionEvent, inboundMessage, roomDirectness } from "./buzz.ts";
 import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
 import type { Agent } from "./config.ts";
@@ -40,6 +41,7 @@ export class GatewayWorker {
   readonly #post: typeof postToProject;
   readonly #active = new Map<string, LiveAgent>();
   readonly #waiting = new Set<string>();
+  readonly #typing = new Map<string, { agent: Agent; record: DeliveryRecord; expires: number }>();
   readonly #owner = randomUUID();
 
   constructor(
@@ -61,6 +63,7 @@ export class GatewayWorker {
     if (this.#agents.size) {
       jobs.push(this.#poll(inboxTopic, job => this.#deliver(job), signal));
       jobs.push(this.#poll(outboxTopic, job => this.#publish(job), signal));
+      jobs.push(this.#typingPulses(signal));
     }
     await Promise.all(jobs);
   }
@@ -359,6 +362,26 @@ export class GatewayWorker {
     await this.#queue.sendReconciliation(reference);
   }
 
+  async #typingPulses(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      await pause(4000, signal);
+      if (signal.aborted) return;
+      await Promise.all([...this.#typing].map(async ([key, { agent, record, expires }]) => {
+        const active = this.#active.get(agent.id);
+        if (!active || expires < Date.now() || !this.#isLive(active) || !this.#deliveryAllowed(agent, record)) {
+          this.#typing.delete(key);
+          return;
+        }
+        try {
+          const draft = actionEvent({ ...record.delivery, kind: "typing" }, record.target, Date.now());
+          await active.socket.publish(active.socket.signer.sign(draft));
+        } catch (error) {
+          log("debug", "typing_pulse_failed", { registrationId: agent.id, error: errorName(error) });
+        }
+      }));
+    }
+  }
+
   async #publish(input: unknown): Promise<void> {
     const parsed = actionJobSchema.safeParse(input);
     if (!parsed.success) { log("warn", "invalid_outbox_job"); return; }
@@ -373,6 +396,24 @@ export class GatewayWorker {
     const record = await this.#state.read<DeliveryRecord>(deliveryPath(action));
     if (!record || !this.#deliveryAllowed(agent, record.value)) return;
     const { target } = record.value;
+    const pulseKey = deliveryPath(action);
+    if (action.kind === "status") {
+      const busy = await publishActivity(this.#state, {
+        sign: draft => active.socket.signer.sign(draft),
+        publish: event => {
+          if (!this.#isLive(active)) throw new Error("Relay lease expired before activity publication");
+          return active.socket.publish(event);
+        },
+      }, action, target, queuedAt);
+      if (busy && !record.value.completed) this.#typing.set(pulseKey, { agent, record: record.value, expires: Date.now() + 90000 });
+      else this.#typing.delete(pulseKey);
+      log("debug", "buzz_status_published", { registrationId: agent.id, eventId: action.eventId, revision: action.revision });
+      return;
+    }
+    if (action.kind === "typing" && this.#typing.has(pulseKey) && !record.value.completed) {
+      this.#typing.get(pulseKey)!.expires = Date.now() + 90000;
+    }
+    if (action.kind === "reply") this.#typing.delete(pulseKey);
     let saved = action.kind === "typing" ? null : await this.#state.read<PublishedAction>(path);
     if (saved?.value.published || saved?.value.rejected) return;
     if (!saved && action.kind !== "typing") {
@@ -406,6 +447,8 @@ export class GatewayWorker {
     if (agent.roomAccess === "membership" && (!active || !this.#isLive(active) || !active.membership)) {
       throw new Error("Waiting for a Buzz membership snapshot");
     }
+    if (record.delivery.visibility === "private" && agent.roomAccess === "membership"
+      && active?.membership?.rooms.get(record.target.channelId)?.visibility !== "private") return false;
     const { delivery, target } = record;
     return roomDirectness(agent, target.channelId, target.author, active?.membership?.rooms) === delivery.direct;
   }

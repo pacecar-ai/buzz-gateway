@@ -29,7 +29,9 @@ export class GatewayQueue implements Outbox {
 
   async sendAction(job: ActionJob): Promise<void> {
     await this.#client.send(outboxTopic, job, {
-      idempotencyKey: actionId(job.action),
+      idempotencyKey: job.action.kind === "typing"
+        ? stableId(actionId(job.action), String(Math.floor(job.queuedAt / 4000)))
+        : actionId(job.action),
       retentionSeconds: job.action.kind === "typing" ? 60 : queueRetentionSeconds,
     });
   }

@@ -22,6 +22,8 @@ export const deliverySchema = z.object({
   roomId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
   author: hexId,
   direct: z.boolean(),
+  mentioned: z.boolean().optional(),
+  visibility: z.enum(["private", "public"]).optional(),
   text: z.string().min(1).max(16000),
 });
 export type Delivery = z.infer<typeof deliverySchema>;
@@ -32,6 +34,8 @@ export const actionSchema = z.discriminatedUnion("kind", [
   z.object({ ...actionContext, kind: z.literal("reply"), text: z.string().trim().min(1).max(16000) }),
   z.object({ ...actionContext, kind: z.literal("reaction"), emoji: z.string().trim().min(1).max(24) }),
   z.object({ ...actionContext, kind: z.literal("typing") }),
+  z.object({ ...actionContext, kind: z.literal("status"), revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    text: z.string().trim().min(1).max(1800).nullable(), busy: z.boolean() }),
 ]);
 export type Action = z.infer<typeof actionSchema>;
 export const actionJobSchema = z.object({ action: actionSchema, queuedAt: z.number().int().positive() });
@@ -64,7 +68,8 @@ export function deliveryPath(reference: Pick<Delivery, "namespace" | "eventId">)
 }
 
 export function actionId(action: Action): string {
-  return stableId(action.namespace, action.eventId, action.kind, action.kind === "reaction" ? action.emoji : "");
+  const version = action.kind === "reaction" ? action.emoji : action.kind === "status" ? String(action.revision) : "";
+  return stableId(action.namespace, action.eventId, action.kind, version);
 }
 
 export async function readJson(request: Request, maxBytes = 48_000): Promise<unknown> {

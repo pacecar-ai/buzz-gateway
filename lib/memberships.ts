@@ -8,7 +8,7 @@ const memberKind = 39002;
 const metadataKind = 39000;
 const roomLimit = 500;
 
-type BuzzRoom = { direct: boolean; members: ReadonlySet<string>; rosterAt: number };
+type BuzzRoom = { direct: boolean; visibility?: "public" | "private"; members: ReadonlySet<string>; rosterAt: number };
 export type BuzzRooms = ReadonlyMap<string, BuzzRoom>;
 
 export async function relaySigningKey(relayUrl: string): Promise<string> {
@@ -46,7 +46,7 @@ export async function readRooms(socket: BuzzSocket, relayKey: string): Promise<B
       const isPublic = event.tags.some(tag => tag[0] === "public");
       if (!roomMembers || isPublic === isPrivate || event.tags.some(tag => tag[0] === "archived")) continue;
       if ((type === "stream" && (isPrivate || socket.agent.includePublicChannels)) || (type === "dm" && isPrivate)) {
-        rooms.set(id, { direct: type === "dm", ...roomMembers });
+        rooms.set(id, { direct: type === "dm", visibility: isPrivate ? "private" : "public", ...roomMembers });
       }
     }
   }
@@ -57,7 +57,7 @@ export function sameRooms(current: BuzzRooms, next: BuzzRooms): boolean {
   if (current.size !== next.size) return false;
   for (const [id, before] of current) {
     const after = next.get(id);
-    if (!after || before.direct !== after.direct || before.members.size !== after.members.size) return false;
+    if (!after || before.direct !== after.direct || before.visibility !== after.visibility || before.members.size !== after.members.size) return false;
     for (const key of before.members) if (!after.members.has(key)) return false;
   }
   return true;
