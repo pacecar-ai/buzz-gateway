@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
+import { SignJWT } from "jose";
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event } from "nostr-tools/pure";
 import { WebSocketServer } from "ws";
 import { acceptAction } from "../lib/actions.ts";
@@ -10,8 +15,8 @@ import {
   actionId, actionKeyHeader, deliveryPath, deliverySchema, eveDeliveryPath, eveResultPath, healthPath,
   inboxTopic, outboxTopic, stableId, type ActionJob, type Delivery,
 } from "../lib/protocol.ts";
-import type { InboxJob } from "../lib/queue.ts";
-import type { State, Versioned } from "../lib/state.ts";
+import { GatewayQueue, type InboxJob } from "../lib/queue.ts";
+import { BlobState, type State, type Versioned } from "../lib/state.ts";
 import { GatewayWorker } from "../lib/worker.ts";
 
 class MemoryState implements State {
@@ -184,4 +189,53 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     await new Promise<void>((resolve, reject) => relay.close(error => error ? reject(error) : resolve()));
     delete process.env[keyEnv];
   }
+});
+
+test("Blob and Queues read a newly rotated daemon OIDC token", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "buzz-oidc-fixture-"));
+  const tokenPath = join(directory, "token");
+  const requests: string[] = [];
+  const blob = createServer((request, response) => {
+    requests.push(request.headers.authorization ?? "");
+    request.resume();
+    response.setHeader("content-type", "application/json");
+    response.end("{}");
+  });
+  await new Promise<void>((resolve, reject) => blob.listen(0, "127.0.0.1", resolve).once("error", reject));
+  const address = blob.address();
+  assert(address && typeof address !== "string");
+  const env = {
+    VERCEL_OIDC_TOKEN_FILE: tokenPath,
+    BLOB_STORE_ID: "store_fixture",
+    BUZZ_GATEWAY_REGION: "iad1",
+    VERCEL_BLOB_API_URL: `http://127.0.0.1:${address.port}`,
+  };
+  const previous = Object.entries(env).map(([name]) => [name, process.env[name]] as const);
+  Object.assign(process.env, env);
+  t.after(async () => {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await new Promise<void>((resolve, reject) => blob.close(error => error ? reject(error) : resolve()));
+    await rm(directory, { recursive: true });
+  });
+
+  t.mock.method(globalThis, "fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(new Headers(init?.headers).get("authorization") ?? "");
+    return Response.json({ messageId: "fixture" });
+  });
+  const storage = new BlobState();
+  const queue = new GatewayQueue();
+  const action = {
+    version: 1, registrationId: "fixture", namespace: "1".repeat(64), eventId: "2".repeat(64), kind: "typing",
+  } as const;
+  const tokens = await Promise.all(["first", "second"].map(revision => new SignJWT({ revision })
+    .setProtectedHeader({ alg: "HS256" }).setExpirationTime("5m").sign(new Uint8Array(32))));
+  for (const token of tokens) {
+    await writeFile(tokenPath, token + "\n");
+    await storage.write(healthPath, { at: Date.now() });
+    await queue.sendAction({ action, queuedAt: Date.now() });
+  }
+  assert.deepEqual(requests, tokens.flatMap(token => [`Bearer ${token}`, `Bearer ${token}`]));
 });

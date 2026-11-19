@@ -33,7 +33,7 @@
     "jose": "6.2.18",
     "nostr-tools": "2.26.1",
     "ws": "8.23.0",
-    "zod": "4.5.4"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
@@ -48,6 +48,15 @@
   "peerDependenciesMeta": {
     "eve": {
       "optional": true
+    }
+  },
+  "overrides": {
+    "@vercel/blob": {
+      "@vercel/oidc": "$@vercel/oidc"
+    },
+    "@vercel/queue": {
+      "@vercel/oidc": "$@vercel/oidc",
+      "minimatch": "11.0.9"
     }
   }
 }
