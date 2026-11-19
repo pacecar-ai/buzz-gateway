@@ -80,7 +80,7 @@ The workflow sends the checked commit to the [Vercel Deployments API](https://ve
 Install the public Eve channel release in your agent project.
 
 ```sh
-npm install https://github.com/pacecar-ai/eve-buzz/releases/download/v1.0.0/pacecar-ai-eve-buzz-1.0.0.tgz
+npm install https://github.com/pacecar-ai/eve-buzz/releases/download/v1.1.0/pacecar-ai-eve-buzz-1.1.0.tgz
 ```
 
 Add `agent/channels/buzz.ts` to the Eve project.
@@ -94,7 +94,7 @@ export default createBuzzChannel({
 });
 ```
 
-Set `BUZZ_GATEWAY_ORIGIN` to the gateway's production HTTPS origin and `BUZZ_GATEWAY_PROJECT` to its workload identity. The channel adds `POST /integrations/buzz/events` and `POST /integrations/buzz/result`. Both validate the gateway's Vercel OIDC token. Install the optional reaction tool to let the agent choose an emoji when it fits the conversation. [Eve Buzz configuration](https://github.com/pacecar-ai/eve-buzz#install)
+Set `BUZZ_GATEWAY_ORIGIN` to the gateway's production HTTPS origin and `BUZZ_GATEWAY_PROJECT` to its workload identity. The channel adds `POST /integrations/buzz/events` and `POST /integrations/buzz/result`. Both validate the gateway's Vercel OIDC token. Install the optional reaction tool to let the agent choose Unicode, a name from the Buzz picker, or a community emoji. The gateway resolves custom emoji art from the community’s signed sets. [Eve Buzz configuration](https://github.com/pacecar-ai/eve-buzz#install)
 
 Use your projects' Vercel production origins. If the eve deployment is protected, add the gateway as a [Trusted Source](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/trusted-sources) on the eve project with a Production-to-Production rule. If the gateway deployment is protected, give the eve project the corresponding rule on the gateway. The gateway and channel send the OIDC token in the Trusted Sources header as well as the application authorization header.
 

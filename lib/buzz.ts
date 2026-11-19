@@ -2,7 +2,7 @@ import { z } from "zod";
 import { verifyEvent, type Event, type EventTemplate } from "nostr-tools/pure";
 import type { Agent } from "./config.ts";
 import type { BuzzRooms } from "./memberships.ts";
-import { deliverySchema, stableId, type Action, type Delivery } from "./protocol.ts";
+import { deliverySchema, stableId, type Action, type ActionJob, type Delivery } from "./protocol.ts";
 import type { Target } from "./state.ts";
 
 const keyHex = /^[a-f0-9]{64}$/;
@@ -58,10 +58,11 @@ export function inboundMessage(agent: Agent, event: Event, membership?: BuzzRoom
   };
 }
 
-export function actionEvent(action: Exclude<Action, { kind: "status" }>, target: Target, queuedAt: number): EventTemplate {
+export function actionEvent(action: Exclude<Action, { kind: "status" }>, target: Target, queuedAt: number, reactionAsset?: ActionJob["reactionAsset"]): EventTemplate {
   const created_at = Math.floor(queuedAt / 1000);
   const tags = [["h", target.channelId]];
   if (action.kind === "reaction") {
+    if (reactionAsset && action.emoji === ":" + reactionAsset.name + ":") tags.push(["emoji", reactionAsset.name, reactionAsset.url]);
     return {
       kind: 7, created_at, content: action.emoji,
       tags: [...tags, ["e", target.sourceEventId], ["p", target.author], ["k", "9"]],

@@ -65,3 +65,36 @@ test("a completion arriving before the first progress update prevents stale acti
   await f.update(5, "Thinking…");
   assert.deepEqual(f.events, []);
 });
+
+test("custom reactions use the latest surviving community definition and carry its native emoji tag", async () => {
+  const { communityEmojiUrl } = await import("../lib/community-emoji.ts");
+  const set = (pubkey: string, created_at: number, value?: string) => ({ kind: 30030, pubkey, id: String(created_at), created_at,
+    tags: [["d", "buzz:custom-emoji"], ...(value ? [["emoji", "ship", value]] : [])] });
+  const sets = [set("one", 4, "https://media.example/old"), set("one", 5),
+    set("two", 1, "https://media.example/b"), set("three", 1, "https://media.example/a"), set("four", 9, "javascript:unsupported")];
+  assert.equal(communityEmojiUrl(sets, "missing"), undefined);
+  const url = communityEmojiUrl(sets, "ship");
+  assert.equal(url, "https://media.example/a");
+  const draft = actionEvent({ ...ref, kind: "reaction", emoji: ":ship:" }, target, Date.now(), { name: "ship", url });
+  assert.ok(draft.tags.some(t => t.join(" ") === "emoji ship https://media.example/a"));
+  assert.ok(draft.tags.some(t => t[0] === "e" && t[1] === target.sourceEventId));
+});
+
+test("the action API resolves custom art for an admitted receipt after project verification", async () => {
+  const { acceptAction } = await import("../lib/actions.ts");
+  const agent = { id: "one", namespace: ref.namespace, eveProject: {} } as never;
+  const state = { read: async () => ({ value: { delivery: { registrationId: "one" } } }) } as unknown as State;
+  const calls: string[] = [];
+  const jobs: unknown[] = [];
+  const run = (authorized: boolean, url?: string) => acceptAction(new Request("https://gateway.example/api/actions", {
+    method: "POST", headers: { authorization: "Bearer fixture", "content-type": "application/json" },
+    body: JSON.stringify({ ...ref, kind: "reaction", emoji: ":ship:", reactionAsset: { url: "https://untrusted.example/art" } }),
+  }), new Map([["one", agent]]), state, { async sendAction(job) { jobs.push(job); } }, async () => authorized, undefined,
+    async (_agent, _state, name) => { calls.push(name); return url; });
+  assert.equal((await run(false)).status, 403);
+  assert.equal(calls.length, 0);
+  assert.equal((await run(true)).status, 422);
+  assert.equal(jobs.length, 0);
+  assert.equal((await run(true, "https://media.example/ship")).status, 202);
+  assert.deepEqual((jobs[0] as { reactionAsset: unknown }).reactionAsset, { name: "ship", url: "https://media.example/ship" });
+});

@@ -32,13 +32,14 @@ export const deliveryReferenceSchema = deliverySchema.omit({ text: true });
 const actionContext = { version: z.literal(1), registrationId, namespace: hexId, eventId: hexId };
 export const actionSchema = z.discriminatedUnion("kind", [
   z.object({ ...actionContext, kind: z.literal("reply"), text: z.string().trim().min(1).max(16000) }),
-  z.object({ ...actionContext, kind: z.literal("reaction"), emoji: z.string().trim().min(1).max(24) }),
+  z.object({ ...actionContext, kind: z.literal("reaction"), emoji: z.string().trim().min(1).max(66) }),
   z.object({ ...actionContext, kind: z.literal("typing") }),
   z.object({ ...actionContext, kind: z.literal("status"), revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     text: z.string().trim().min(1).max(1800).nullable(), busy: z.boolean() }),
 ]);
 export type Action = z.infer<typeof actionSchema>;
-export const actionJobSchema = z.object({ action: actionSchema, queuedAt: z.number().int().positive() });
+export const actionJobSchema = z.object({ action: actionSchema, queuedAt: z.number().int().positive(),
+  reactionAsset: z.object({ name: z.string().regex(/^[a-z0-9_-]{1,64}$/), url: z.url().max(2048) }).optional() });
 export type ActionJob = z.infer<typeof actionJobSchema>;
 
 export const receiptSchema = z.object({

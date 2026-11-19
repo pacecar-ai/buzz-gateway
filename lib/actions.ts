@@ -1,4 +1,5 @@
 import { fromProject, matchesActionKey } from "./auth.ts";
+import { readCommunityEmoji, shortcode } from "./community-emoji.ts";
 import type { Agent } from "./config.ts";
 import { errorName, log } from "./log.ts";
 import { actionId, actionSchema, deliveryPath, readJson } from "./protocol.ts";
@@ -12,6 +13,7 @@ export async function acceptAction(
   outbox: Outbox,
   authorize = fromProject,
   actionKeyDigest = process.env.BUZZ_GATEWAY_ACTION_KEY_SHA256,
+  resolveEmoji = readCommunityEmoji,
 ): Promise<Response> {
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
   if (!request.headers.has("authorization")) return new Response(null, { status: 401 });
@@ -30,7 +32,14 @@ export async function acceptAction(
   try {
     const record = await state.read<DeliveryRecord>(deliveryPath(action));
     if (!record || record.value.delivery.registrationId !== agent.id) return new Response(null, { status: 404 });
-    await outbox.sendAction({ action, queuedAt: Date.now() });
+    let reactionAsset;
+    const name = action.kind === "reaction" ? shortcode.exec(action.emoji)?.[1] : undefined;
+    if (name) {
+      const url = await resolveEmoji(agent, state, name);
+      if (!url) return new Response(null, { status: 422 });
+      reactionAsset = { name, url };
+    }
+    await outbox.sendAction({ action, queuedAt: Date.now(), reactionAsset });
     log("info", "action_queued", { actionId: id, registrationId: agent.id, eventId: action.eventId, kind: action.kind });
     return Response.json({ accepted: true, actionId: id }, { status: 202 });
   } catch (error) {

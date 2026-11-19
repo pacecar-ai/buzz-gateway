@@ -392,7 +392,7 @@ export class GatewayWorker {
   async #publish(input: unknown): Promise<void> {
     const parsed = actionJobSchema.safeParse(input);
     if (!parsed.success) { log("warn", "invalid_outbox_job"); return; }
-    const { action, queuedAt } = parsed.data;
+    const { action, queuedAt, reactionAsset } = parsed.data;
     const agent = this.#agents.get(action.registrationId);
     if (!agent || agent.namespace !== action.namespace) { log("warn", "outbox_registration_retired"); return; }
     if (action.kind === "typing" && Date.now() - queuedAt > typingLifetimeMs) return;
@@ -424,14 +424,14 @@ export class GatewayWorker {
     let saved = action.kind === "typing" ? null : await this.#state.read<PublishedAction>(path);
     if (saved?.value.published || saved?.value.rejected) return;
     if (!saved && action.kind !== "typing") {
-      const event = active.socket.signer.sign(actionEvent(action, target, queuedAt));
+      const event = active.socket.signer.sign(actionEvent(action, target, queuedAt, reactionAsset));
       await this.#state.create<PublishedAction>(path, { event }, receiptRetentionDays);
       saved = await this.#state.read<PublishedAction>(path);
       if (saved?.value.published || saved?.value.rejected) return;
       if (!saved?.value.event) throw new Error("Signed publish record unavailable");
     }
     if (!this.#isLive(active)) throw new Error("Relay lease expired before publish");
-    const event = saved?.value.event ?? active.socket.signer.sign(actionEvent(action, target, queuedAt));
+    const event = saved?.value.event ?? active.socket.signer.sign(actionEvent(action, target, queuedAt, reactionAsset));
     try {
       await active.socket.publish(event);
     } catch (error) {
