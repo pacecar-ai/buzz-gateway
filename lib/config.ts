@@ -38,6 +38,7 @@ export const agentSchema = z.object({
   eveProject: projectIdentity,
   actionKeyDigest: hexId.optional(),
   roomAccess: z.enum(["configured", "membership"]).default("configured"),
+  includePublicChannels: z.boolean().optional(),
   channels: z.array(channelId).max(100).default([]),
   directMessages: z.array(z.object({ channelId, authors: z.array(hexId).min(1).max(64) })).max(100).default([]),
 }).refine(agent => Boolean(agent.signingKeyEnv) !== Boolean(agent.credentialConnector), {

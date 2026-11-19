@@ -13,7 +13,7 @@ import { errorName, log } from "./log.ts";
 import { readRooms, relaySigningKey, sameRooms, type BuzzRooms } from "./memberships.ts";
 import {
   actionId, actionJobSchema, deliveryPath, deliverySchema, deliveryStatusHeader, eveDeliveryPath, eveResultPath, healthPath,
-  hexId, inboxTopic, outboxTopic, receiptRetentionDays, receiptSchema, registrationId, typingLifetimeMs,
+  hexId, inboxTopic, outboxTopic, queueRetentionSeconds, receiptRetentionDays, receiptSchema, registrationId, typingLifetimeMs,
 } from "./protocol.ts";
 import type { GatewayQueue } from "./queue.ts";
 import type { DeliveryRecord, State } from "./state.ts";
@@ -185,29 +185,40 @@ export class GatewayWorker {
         ? [...active.membership.rooms.keys()]
         : [...agent.channels, ...agent.directMessages.map(room => room.channelId)];
       const checkpointPath = `${agent.namespace}/checkpoint.json`;
-      const checkpoint = await this.#state.read<{ since: number }>(checkpointPath);
+      const checkpoint = await this.#state.read<{ since: number; rooms?: string[] }>(checkpointPath);
       const since = Math.max(0, (checkpoint?.value.since ?? issuerEpoch()) - overlapSeconds);
+      const previousRooms = new Set(checkpoint?.value.rooms);
+      const roomStarts = new Map<string, number>();
+      for (const [id, room] of active.membership?.rooms ?? []) {
+        // A mention can arrive immediately after an invite, before membership refresh or a deployment.
+        roomStarts.set(id, previousRooms.has(id) ? since : Math.max(issuerEpoch() - queueRetentionSeconds, room.rosterAt));
+      }
+      let roomsChanged = Boolean(active.membership && (!checkpoint?.value.rooms || previousRooms.size !== channels.length
+        || channels.some(id => !previousRooms.has(id))));
       let stored = false;
       let highWater = checkpoint?.value.since ?? since;
       let lastSaved = highWater;
       const save = async () => {
-        if (!this.#isLive(active) || highWater <= lastSaved) return;
+        if (!this.#isLive(active) || (highWater <= lastSaved && !roomsChanged)) return;
         const previous = await this.#state.read<{ since: number }>(checkpointPath);
-        const next = { since: Math.max(previous?.value.since ?? 0, highWater) };
+        const next = { since: Math.max(previous?.value.since ?? 0, highWater), ...(active.membership && { rooms: channels }) };
         if (!this.#isLive(active)) return;
         const ok = previous
           ? await this.#state.replace(checkpointPath, next, previous.etag)
           : await this.#state.create(checkpointPath, next);
-        if (ok) lastSaved = next.since;
+        if (ok) { lastSaved = next.since; roomsChanged = false; }
       };
       this.#active.set(agent.id, active);
-      socket.subscribe(since, channels, async event => {
+      socket.subscribe(roomStarts.size ? Math.min(...roomStarts.values()) : since, channels, async event => {
         if (!this.#isLive(active)) return;
+        const roomId = event.tags.find(tag => tag[0] === "h")?.[1];
+        if (roomId && event.created_at < (roomStarts.get(roomId) ?? since)) return;
         await this.#ingest(agent, event, active.membership?.rooms);
         highWater = Math.max(highWater, Math.min(event.created_at, issuerEpoch()));
         // Stored events can arrive newest first. Commit the catch-up checkpoint after EOSE.
         if (stored && highWater - lastSaved >= 30) await save();
       }, async () => { stored = true; await save(); });
+      if (!channels.length) await save();
       log("info", "relay_authenticated", { registrationId: agent.id, rooms: channels.length });
       if (agent.profile) await this.#publishProfile(active, agent.profile);
       if (agent.profileFromConnector && agent.credentialConnector) {

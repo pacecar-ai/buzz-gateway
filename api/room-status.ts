@@ -63,12 +63,17 @@ export default {
           ownerMember: Boolean(roster?.tags.some(t => t[0] === "p" && t[1] === agent.desktop!.ownerPubkey)),
           subscribed: eligible.has(id), rosterAt: roster?.created_at };
       });
-      const messages = await Promise.all(recent.filter(e => e.pubkey === agent.desktop!.ownerPubkey && e.kind === 9).map(async event => {
+      const ownerMessages = recent.filter(e => e.pubkey === agent.desktop!.ownerPubkey && e.kind === 9);
+      const replies = ownerMessages.length ? await socket.query({ kinds: [9], authors: [agent.pubkey],
+        "#e": ownerMessages.map(e => e.id), since, limit: 64 }) : [];
+      const messages = await Promise.all(ownerMessages.map(async event => {
         const roomId = event.tags.find(t => t[0] === "h")?.[1];
         if (!rooms.includes(roomId!)) return;
         const record = await state.read<DeliveryRecord>(deliveryPath({ namespace: agent.namespace, eventId: event.id }));
         return { id: event.id, roomId, at: event.created_at, mentioned: event.tags.some(t => t[0] === "p" && t[1] === agent.pubkey),
-          routable: Boolean(inboundMessage(agent, event, eligible)), queued: Boolean(record), admitted: Boolean(record?.value.receipt), completed: Boolean(record?.value.completed) };
+          routable: Boolean(inboundMessage(agent, event, eligible)), queued: Boolean(record), admitted: Boolean(record?.value.receipt), completed: Boolean(record?.value.completed),
+          delivered: replies.some(reply => reply.pubkey === agent.pubkey && reply.kind === 9 &&
+            reply.tags.some(tag => tag[0] === "h" && tag[1] === roomId) && reply.tags.some(tag => tag[0] === "e" && tag[1] === event.id)) };
       }));
       return reply({ rooms: summary, messages: messages.filter(Boolean) });
     } catch (error) {

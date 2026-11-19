@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { SignJWT } from "jose";
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event } from "nostr-tools/pure";
 import { WebSocketServer } from "ws";
@@ -78,7 +78,7 @@ class MemoryQueue {
   }
 }
 
-test("routes an invited private Buzz room and publishes a signed threaded reply", { timeout: 15_000 }, async t => {
+async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
   const relayKey = generateSecretKey();
   const relaySigningKey = getPublicKey(relayKey);
   const server = createServer((request, response) => {
@@ -94,7 +94,8 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
   const botKey = generateSecretKey();
   const pubkey = getPublicKey(botKey);
   const author = generateSecretKey();
-  const created_at = Math.floor(Date.now() / 1000);
+  const now = Math.floor(Date.now() / 1000);
+  const created_at = publicChannel ? now - 480 : now;
   const question = finalizeEvent({
     kind: 9, created_at, content: "fixture private message", tags: [["h", "test-room"], ["p", pubkey]],
   }, author);
@@ -104,6 +105,9 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
   const outsider = finalizeEvent({
     kind: 9, created_at, content: "outsider", tags: [["h", "test-room"], ["p", pubkey]],
   }, generateSecretKey());
+  const beforeJoining = finalizeEvent({
+    kind: 9, created_at: created_at - 5, content: "older mention", tags: [["h", "test-room"], ["p", pubkey]],
+  }, author);
   const privateRoom = [["d", "test-room"], ["t", "stream"]];
   const publicRoom = [["d", "public-room"], ["t", "stream"]];
   const roomMembers = [["p", pubkey], ["p", getPublicKey(author)]];
@@ -142,11 +146,13 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
               break;
             case 39000:
               assert.deepEqual(filter["#d"], ["test-room", "public-room"]);
-              events = [group(39000, [...privateRoom, ["private"]]), group(39000, [...publicRoom, ["public"]])];
+              events = [group(39000, [...privateRoom, [publicChannel ? "public" : "private"]]),
+                group(39000, [...publicRoom, ["public"], ...(publicChannel ? [["archived"]] : [])])];
               break;
             default:
               assert.deepEqual(filter["#h"], ["test-room"]);
-              events = [unauthorizedRoom, outsider, question, question];
+              assert(filter.since <= created_at);
+              events = [unauthorizedRoom, outsider, beforeJoining, question, question];
           }
           for (const event of events) {
             socket.send(JSON.stringify(["EVENT", eventOrSubscription, event]));
@@ -174,10 +180,12 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
     eveUrl: "https://eve.example.com",
     eveProject: { teamSlug: "example", teamId: "team_example", projectId: "prj_agent" },
     roomAccess: "membership",
+    includePublicChannels: publicChannel,
     profile,
     actionKeyDigest: digest(key),
   }]) });
   const state = new MemoryState();
+  if (publicChannel) await state.write(agents.get("test-agent")!.namespace + "/checkpoint.json", { since: now, rooms: [] });
   const queue = new MemoryQueue();
   const admissions: Delivery[] = [];
   let reconciled = false;
@@ -232,6 +240,7 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
     assert(await state.read(healthPath));
     assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: unauthorizedRoom.id })), null);
     assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: outsider.id })), null);
+    assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: beforeJoining.id })), null);
     const entries = logs.mock.calls.map(call => call.arguments[0]);
     assert(entries.some(line => line.includes("buzz_action_published") && line.includes(question.id)));
     assert(entries.every(line => !/fixture private|fixture-credential|fixture-callback-key/.test(line)));
@@ -243,7 +252,11 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     delete process.env[keyEnv];
   }
-});
+}
+
+test("routes an invited private Buzz room and publishes a signed threaded reply", { timeout: 15_000 }, t => roomRoundTrip(t, false));
+test("replays a mention after joining a public channel while excluding earlier and nonmember messages",
+  { timeout: 15_000 }, t => roomRoundTrip(t, true));
 
 test("resolves a scoped Buzz grant from Connect and requests a relay-bound assertion", async t => {
   const signingKey = generateSecretKey();

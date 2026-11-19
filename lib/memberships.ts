@@ -8,7 +8,8 @@ const memberKind = 39002;
 const metadataKind = 39000;
 const roomLimit = 500;
 
-export type BuzzRooms = ReadonlyMap<string, { direct: boolean; members: ReadonlySet<string> }>;
+type BuzzRoom = { direct: boolean; members: ReadonlySet<string>; rosterAt: number };
+export type BuzzRooms = ReadonlyMap<string, BuzzRoom>;
 
 export async function relaySigningKey(relayUrl: string): Promise<string> {
   const endpoint = new URL(relayUrl);
@@ -24,15 +25,15 @@ export async function relaySigningKey(relayUrl: string): Promise<string> {
 
 export async function readRooms(socket: BuzzSocket, relayKey: string): Promise<BuzzRooms> {
   const agentKey = socket.agent.pubkey;
-  const members = new Map<string, ReadonlySet<string>>();
+  const members = new Map<string, Pick<BuzzRoom, "members" | "rosterAt">>();
   // Buzz returns signed group records filtered by the authenticated agent's memberships.
   const memberEvents = await socket.query({ kinds: [memberKind], authors: [relayKey], "#p": [agentKey], limit: roomLimit });
   for (const [id, event] of latestGroups(memberEvents, memberKind, relayKey)) {
     const keys = new Set(event.tags.filter(tag => tag[0] === "p" && hexId.safeParse(tag[1]).success).map(tag => tag[1]));
-    if (keys.has(agentKey)) members.set(id, keys);
+    if (keys.has(agentKey)) members.set(id, { members: keys, rosterAt: event.created_at });
   }
 
-  const rooms = new Map<string, { direct: boolean; members: ReadonlySet<string> }>();
+  const rooms = new Map<string, BuzzRoom>();
   const ids = [...members.keys()];
   // Bound the number of tag values in one REQ. An installation can span many private rooms.
   for (let offset = 0; offset < ids.length; offset += 100) {
@@ -41,10 +42,11 @@ export async function readRooms(socket: BuzzSocket, relayKey: string): Promise<B
     for (const [id, event] of latestGroups(events, metadataKind, relayKey)) {
       const roomMembers = batch.includes(id) ? members.get(id) : undefined;
       const type = event.tags.find(tag => tag[0] === "t")?.[1];
-      const privateRoom = event.tags.some(tag => tag[0] === "private")
-        && !event.tags.some(tag => tag[0] === "public" || tag[0] === "archived");
-      if (roomMembers && privateRoom && (type === "stream" || type === "dm")) {
-        rooms.set(id, { direct: type === "dm", members: roomMembers });
+      const isPrivate = event.tags.some(tag => tag[0] === "private");
+      const isPublic = event.tags.some(tag => tag[0] === "public");
+      if (!roomMembers || isPublic === isPrivate || event.tags.some(tag => tag[0] === "archived")) continue;
+      if ((type === "stream" && (isPrivate || socket.agent.includePublicChannels)) || (type === "dm" && isPrivate)) {
+        rooms.set(id, { direct: type === "dm", ...roomMembers });
       }
     }
   }

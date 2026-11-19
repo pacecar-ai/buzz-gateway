@@ -12,6 +12,7 @@ const specSchema = z.object({
   icon: z.string().regex(/^[a-f0-9]{40}$/).optional(), connectorId: z.string().regex(/^scl_[A-Za-z0-9]+$/).optional(),
   gatewayProjectId: projectIdentity.shape.projectId, eveProject: projectIdentity, eveUrl: z.url(), relayUrl: z.url(),
   federatedIdentityAdapter: z.url(), desktop: z.object({ ownerPubkey: hexId, projectSlug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/) }),
+  includePublicChannels: z.boolean().default(true),
 });
 const [specFile, gateway] = process.argv.slice(2);
 if (!specFile) throw new Error("Usage: node scripts/prepare-desktop.ts registration.json [gateway HTTPS origin for a pending web invitation]");

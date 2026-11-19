@@ -1,6 +1,6 @@
 # Buzz Gateway
 
-Run an [eve](https://eve.dev/) agent as a native member of a [Buzz](https://github.com/block/buzz) community. Authorize the agent in Buzz, then invite it to private channels. The gateway carries mentions, follow-ups in joined threads, and messages in the agent's Buzz DMs. It sends signed replies, typing indicators, and optional acknowledgment reactions.
+Run an [eve](https://eve.dev/) agent as a native member of a [Buzz](https://github.com/block/buzz) community. Authorize the agent in Buzz, then add it to the channels where it should respond. The gateway carries mentions, follow-ups in joined threads, and messages in the agent's Buzz DMs. It sends signed replies, typing indicators, and optional acknowledgment reactions.
 
 Inspired by [eve's Discord Gateway relay](https://eve.dev/docs/channels/discord/reference#run-the-relay-as-a-vercel-daemon), originally implemented by [Ben Pankow](https://github.com/vercel/eve/pull/4934).
 
@@ -8,7 +8,7 @@ Inspired by [eve's Discord Gateway relay](https://eve.dev/docs/channels/discord/
 
 Open your team’s Vercel setup link on the computer where you use Buzz. Choose **Install plugin in Buzz** the first time and approve the installation. Return to the link and choose **Open agents in Buzz**. The Vercel page in Buzz shows each invited connector with its name and portrait.
 
-Choose **Connect** for one agent or **Connect all** for the displayed group. Buzz signs a separate ownership approval for each selected identity. If any of them need a federated grant, one browser sign-in covers up to eight selected agents. **Add to Buzz** lists an already authorized agent without another sign-in. Completed agents appear in Buzz’s **Agents** list. Invite an agent to the private room where you want it to respond.
+Choose **Connect** for one agent or **Connect all** for the displayed group. Buzz signs a separate ownership approval for each selected identity. If any of them need a federated grant, one browser sign-in covers up to eight selected agents. **Add to Buzz** lists an already authorized agent without another sign-in. Completed agents appear in Buzz’s **Agents** list. Add an agent through the channel’s Members list, then mention it to start a conversation.
 
 Reopen **Settings → Plugins → Vercel** to see agents in the selected community. **Manage in Vercel** opens the individual connector. After a name or portrait change, open the team invitation, refresh the connectors and choose **Update profile in Buzz** if the hosted listing has an older profile.
 
@@ -205,14 +205,16 @@ Set `BUZZ_GATEWAY_AGENTS` as a JSON array in the gateway's Production environmen
 ```
 
 - Set `federatedIdentityAdapter` to the community's adapter base URL when the relay requires federated sign-in. Omit that property for direct or NIP-AA membership.
-- With `roomAccess: "membership"`, the gateway verifies the relay's signed private-room metadata and member lists. Invite or remove the agent in Buzz. The agent responds to mentions and follow-ups in joined threads and uses one session per Buzz DM room.
+- With `roomAccess: "membership"`, the gateway verifies the relay's signed channel metadata and roster. Set `includePublicChannels: true` for public stream channels where the agent is explicitly a member. Newly prepared desktop registrations enable this option. Older registrations retain private-channel access until configured. In both cases, the gateway checks the sender's membership and excludes archived channels. A newly joined channel replays messages from its signed roster update, up to the queue retention window.
 - Existing registrations with `channels` and `directMessages` still use their configured room access. To switch an existing registration, set `roomAccess` to `membership` and remove those fields.
 - `profile` optionally sets the agent's Buzz `name`, `description`, and HTTPS `picture`. Omit it if the profile is already managed on the relay.
 - `issuerMode` follows the target Vercel team's OIDC issuer setting. Use `global` for the global issuer.
 
-Redeploy the gateway after editing registrations. Check that health reports `relay: "connected"`, then invite and mention the agent in a private Buzz channel. Room membership changes take effect as the daemon refreshes the signed records. A degraded relay status means some registrations still need attention. To uninstall, remove the identity from Buzz, revoke its grant with the adapter, and remove its registration and Connect link.
+Redeploy the gateway after editing registrations. Check that health reports `relay: "connected"`, then add and mention the agent in a supported Buzz channel. Room membership changes take effect as the daemon refreshes the signed records. A degraded relay status means some registrations still need attention. To uninstall, remove the identity from Buzz, revoke its grant with the adapter, and remove its registration and Connect link.
 
 ## Logs and local checks
+
+Operators can trace a missed mention by posting `{"id":"<registration-id>"}` to `/api/room-status` with the desktop operator bearer token. The response shows signed channel membership, recent owner message IDs, and whether each message reached the gateway and agent. Message bodies and credentials stay out of the response.
 
 Vercel captures the daemon and Functions logs as JSON. Search Runtime Logs for `registrationId`, `eventId`, or `actionId` to follow a delivery from `inbound_queued` through `eve_delivery_admitted` and `action_queued` to `buzz_action_published`. Relay authentication, reconnects, queue retries, and rejected publishes also emit events. Set `BUZZ_GATEWAY_LOG_LEVEL` to `debug`, `info`, `warn`, or `error`. The default is `info`. The logs omit message text, signing keys, authorization headers, and raw provider errors.
 
