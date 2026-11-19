@@ -1,0 +1,59 @@
+name: CI and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build:adapter
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.VERCEL_PROJECT_ID != ''
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install Vercel CLI
+        run: npm install --global vercel@66.2.0
+      - name: Deploy the checked commit to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_SLUG: ${{ vars.VERCEL_TEAM_SLUG }}
+          BUZZ_GATEWAY_REGION: ${{ vars.BUZZ_GATEWAY_REGION }}
+        run: |
+          : "${VERCEL_TOKEN:?Set the VERCEL_TOKEN Actions secret}"
+          : "${VERCEL_ORG_ID:?Set the VERCEL_ORG_ID Actions variable}"
+          : "${VERCEL_PROJECT_ID:?Set the VERCEL_PROJECT_ID Actions variable}"
+          : "${VERCEL_TEAM_SLUG:?Set the VERCEL_TEAM_SLUG Actions variable}"
+          : "${BUZZ_GATEWAY_REGION:?Set the BUZZ_GATEWAY_REGION Actions variable}"
+          vercel deploy --prod --yes --non-interactive --scope "$VERCEL_TEAM_SLUG"

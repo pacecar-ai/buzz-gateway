@@ -1,0 +1,324 @@
+import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
+import type { Event } from "nostr-tools/pure";
+import { z } from "zod";
+import { postToProject } from "./auth.ts";
+import { actionEvent, inboundMessage, loadSigner } from "./buzz.ts";
+import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
+import type { Agent } from "./config.ts";
+import { errorName, log } from "./log.ts";
+import {
+  actionId, actionJobSchema, deliveryPath, deliverySchema, eveDeliveryPath, eveResultPath, healthPath,
+  hexId, inboxTopic, outboxTopic, receiptRetentionDays, receiptSchema, registrationId, typingLifetimeMs,
+} from "./protocol.ts";
+import type { GatewayQueue } from "./queue.ts";
+import type { DeliveryRecord, State } from "./state.ts";
+
+const overlapSeconds = 120;
+const leaseDurationMs = 45_000;
+const issuerEpoch = () => Math.floor(Date.now() / 1000);
+const reconcileSchema = z.object({ kind: z.literal("reconcile"), registrationId, namespace: hexId, eventId: hexId });
+const incoming = z.discriminatedUnion("kind", [z.object({ kind: z.literal("message"), delivery: deliverySchema }), reconcileSchema]);
+type Lease = { owner: string; expiresAt: number };
+type LiveAgent = { socket: BuzzSocket; lease: Lease };
+type PublishedAction = { event?: Event; published?: boolean; rejected?: boolean };
+type WorkerQueue = Pick<GatewayQueue, "poll" | "sendDelivery" | "sendReconciliation">;
+
+export class GatewayWorker {
+  readonly #agents: Map<string, Agent>;
+  readonly #state: State;
+  readonly #queue: WorkerQueue;
+  readonly #post: typeof postToProject;
+  readonly #active = new Map<string, LiveAgent>();
+  readonly #owner = randomUUID();
+
+  constructor(
+    agents: Map<string, Agent>,
+    state: State,
+    queue: WorkerQueue,
+    post = postToProject,
+  ) {
+    this.#agents = agents;
+    this.#state = state;
+    this.#queue = queue;
+    this.#post = post;
+  }
+
+  async run(signal: AbortSignal): Promise<void> {
+    log("info", "gateway_daemon_started", { registrations: this.#agents.size });
+    const jobs = [this.#heartbeat(signal)];
+    for (const agent of this.#agents.values()) jobs.push(this.#runAgent(agent, signal));
+    if (this.#agents.size) {
+      jobs.push(this.#poll(inboxTopic, job => this.#deliver(job), signal));
+      jobs.push(this.#poll(outboxTopic, job => this.#publish(job), signal));
+    }
+    await Promise.all(jobs);
+  }
+
+  async #heartbeat(signal: AbortSignal): Promise<void> {
+    let reported = false;
+    while (!signal.aborted) {
+      try {
+        const heartbeat = { at: Date.now(), configured: this.#agents.size, connected: this.#active.size };
+        const previous = await this.#state.read(healthPath);
+        if (previous) await this.#state.replace(healthPath, heartbeat, previous.etag, 1);
+        else await this.#state.create(healthPath, heartbeat, 1);
+        if (!reported) log("info", "gateway_storage_ready", { registrations: this.#agents.size });
+        reported = true;
+      } catch (error) {
+        log("error", "gateway_storage_retry", { error: errorName(error) });
+      }
+      await pause(60_000, signal);
+    }
+  }
+
+  async #poll(topic: typeof inboxTopic | typeof outboxTopic, handler: (input: unknown) => Promise<void>, signal: AbortSignal): Promise<void> {
+    let failures = 0;
+    while (!signal.aborted) {
+      try {
+        const processed = await this.#queue.poll(topic, async job => {
+          if (signal.aborted) throw new Error("Daemon is stopping");
+          await handler(job);
+        });
+        failures = 0;
+        if (!processed) await pause(this.#active.size ? 750 : 4000, signal);
+      } catch (error) {
+        failures += 1;
+        if (failures === 1 || failures % 10 === 0) {
+          log("warn", "queue_retry", { topic, error: errorName(error), failures });
+        }
+        await pause(Math.min(10_000, 1000 * failures), signal);
+      }
+    }
+  }
+
+  async #runAgent(agent: Agent, signal: AbortSignal): Promise<void> {
+    let failures = 0;
+    while (!signal.aborted) {
+      try {
+        const signer = loadSigner(agent);
+        const lease = await this.#claim(agent);
+        if (!lease) {
+          await pause(4000, signal);
+          continue;
+        }
+        await this.#relaySession(agent, signer, lease, signal);
+        failures = 0;
+      } catch (error) {
+        failures += 1;
+        log("warn", "relay_reconnecting", { registrationId: agent.id, error: errorName(error), failures });
+      }
+      await pause(Math.min(30_000, 2000 * 2 ** Math.min(failures, 4)) + Math.floor(Math.random() * 500), signal);
+    }
+  }
+
+  async #claim(agent: Agent, renewing = false): Promise<Lease | undefined> {
+    const path = `relay/${agent.relayIdentity}/lease.json`;
+    const existing = await this.#state.read<Lease>(path);
+    const now = Date.now();
+    if (renewing && (existing?.value.owner !== this.#owner || existing.value.expiresAt <= now)) return;
+    if (existing && existing.value.owner !== this.#owner && existing.value.expiresAt > now) return;
+    const lease = { owner: this.#owner, expiresAt: now + leaseDurationMs };
+    const won = existing
+      ? await this.#state.replace(path, lease, existing.etag)
+      : await this.#state.create(path, lease);
+    if (won) return lease;
+  }
+
+  async #relaySession(agent: Agent, signer: ReturnType<typeof loadSigner>, lease: Lease, signal: AbortSignal): Promise<void> {
+    const socket = new BuzzSocket(agent, signer);
+    const stop = new AbortController();
+    const end = () => { stop.abort(); socket.close(); };
+    signal.addEventListener("abort", end, { once: true });
+    if (signal.aborted) end();
+    const active = { lease, socket };
+    const renewal = this.#maintainRelay(agent, active, stop.signal).catch(error => {
+      log("warn", "relay_lease_lost", { registrationId: agent.id, error: errorName(error) });
+      end();
+    });
+    try {
+      await socket.start();
+      const checkpointPath = `${agent.namespace}/checkpoint.json`;
+      const checkpoint = await this.#state.read<{ since: number }>(checkpointPath);
+      const since = Math.max(0, (checkpoint?.value.since ?? issuerEpoch()) - overlapSeconds);
+      let stored = false;
+      let highWater = checkpoint?.value.since ?? since;
+      let lastSaved = highWater;
+      const save = async () => {
+        if (!this.#isLive(active) || highWater <= lastSaved) return;
+        const previous = await this.#state.read<{ since: number }>(checkpointPath);
+        const next = { since: Math.max(previous?.value.since ?? 0, highWater) };
+        if (!this.#isLive(active)) return;
+        const ok = previous
+          ? await this.#state.replace(checkpointPath, next, previous.etag)
+          : await this.#state.create(checkpointPath, next);
+        if (ok) lastSaved = next.since;
+      };
+      this.#active.set(agent.id, active);
+      socket.subscribe(since, async event => {
+        if (!this.#isLive(active)) return;
+        await this.#ingest(agent, event);
+        highWater = Math.max(highWater, Math.min(event.created_at, issuerEpoch()));
+        // Stored events can arrive newest first. Commit the catch-up checkpoint after EOSE.
+        if (stored && highWater - lastSaved >= 30) await save();
+      }, async () => { stored = true; await save(); });
+      log("info", "relay_authenticated", { registrationId: agent.id });
+      if (agent.profile) {
+        // The optional configuration makes the gateway the publisher for this agent's profile.
+        const profile = JSON.stringify({ name: agent.profile.name, display_name: agent.profile.name, about: agent.profile.description });
+        await socket.publish(signer.sign({ kind: 0, tags: [], content: profile, created_at: issuerEpoch() }));
+        await socket.publish(signer.sign({ kind: 10100, tags: [], content: profile, created_at: issuerEpoch() }));
+      }
+      await this.#presence(agent, socket, "online");
+      await socket.closed;
+    } finally {
+      this.#active.delete(agent.id);
+      end();
+      await Promise.all([renewal, socket.drained()]);
+      const path = `relay/${agent.relayIdentity}/lease.json`;
+      const current = await this.#state.read<Lease>(path);
+      if (current?.value.owner === this.#owner) await this.#state.replace(path, { owner: this.#owner, expiresAt: 0 }, current.etag);
+      log("info", "relay_disconnected", { registrationId: agent.id });
+    }
+  }
+
+  async #maintainRelay(agent: Agent, active: LiveAgent, signal: AbortSignal): Promise<void> {
+    let ticks = 0;
+    while (!signal.aborted) {
+      await pause(14_000, signal);
+      if (signal.aborted) return;
+      const lease = await this.#claim(agent, true);
+      if (!lease) throw new Error("Relay lease expired");
+      active.lease = lease;
+      ticks += 1;
+      if (ticks % 4 === 0 && this.#active.get(agent.id) === active) await this.#presence(agent, active.socket, "online");
+    }
+  }
+
+  async #presence(agent: Agent, socket: BuzzSocket, status: "online"): Promise<void> {
+    try {
+      await socket.publish(socket.signer.sign({ kind: 20001, tags: [], content: status, created_at: issuerEpoch() }));
+    } catch (error) {
+      log("debug", "presence_publish_failed", { registrationId: agent.id, error: errorName(error) });
+    }
+  }
+
+  #isLive(active: LiveAgent): boolean { return active.socket.connected && active.lease.expiresAt > Date.now(); }
+
+  async #ingest(agent: Agent, event: Event): Promise<void> {
+    if ([...this.#agents.values()].some(candidate => candidate.pubkey === event.pubkey)) return;
+    const route = inboundMessage(agent, event);
+    if (!route) return;
+    const { delivery, target, addressed } = route;
+    const threadPath = `${agent.namespace}/thread/${delivery.conversationId}.json`;
+    if (!addressed && !await this.#state.read(threadPath)) return;
+    const path = deliveryPath(delivery);
+    const previous = await this.#state.read<DeliveryRecord>(path);
+    if (previous?.value.receipt || previous?.value.completed) return;
+    if (!previous) {
+      const { text: _text, ...metadata } = delivery;
+      await this.#state.create<DeliveryRecord>(path, { delivery: metadata, target }, receiptRetentionDays);
+    }
+    // The Blob record establishes routing authority before eve can send actions.
+    await this.#queue.sendDelivery(delivery);
+    if (addressed && !delivery.direct) await this.#state.create(threadPath, { joinedAt: Date.now() });
+    log("info", "inbound_queued", { registrationId: agent.id, eventId: delivery.eventId });
+  }
+
+  async #deliver(input: unknown): Promise<void> {
+    const parsed = incoming.safeParse(input);
+    if (!parsed.success) { log("warn", "invalid_inbox_job"); return; }
+    const job = parsed.data;
+    const reference = job.kind === "message" ? job.delivery : job;
+    const agent = this.#agents.get(reference.registrationId);
+    if (!agent || agent.namespace !== reference.namespace) { log("warn", "inbox_registration_retired"); return; }
+    const path = deliveryPath(reference);
+    const record = await this.#state.read<DeliveryRecord>(path);
+    if (!record || record.value.completed || !deliveryAllowed(agent, record.value)) return;
+    if (job.kind === "reconcile") {
+      if (!record.value.receipt) throw new Error("Waiting for eve delivery receipt");
+      const response = await this.#post(agent.eveUrl, eveResultPath, { ...record.value.delivery, receipt: record.value.receipt });
+      if (response.status !== 200) {
+        log(response.status === 202 ? "debug" : "warn", "eve_result_retry", {
+          registrationId: agent.id, eventId: reference.eventId, status: response.status,
+        });
+        throw new Error("eve result pending or unavailable");
+      }
+      await updateDelivery(this.#state, path, current => ({ ...current, completed: true }));
+      log("info", "delivery_reconciled", { registrationId: agent.id, eventId: reference.eventId });
+      return;
+    }
+    if (!record.value.receipt) {
+      const response = await this.#post(agent.eveUrl, eveDeliveryPath, job.delivery);
+      if (response.status !== 202) {
+        log("warn", "eve_delivery_retry", { registrationId: agent.id, eventId: reference.eventId, status: response.status });
+        throw new Error("eve admission unavailable");
+      }
+      const receipt = receiptSchema.parse(await response.json());
+      await updateDelivery(this.#state, path, current => ({ ...current, receipt: current.receipt ?? receipt }));
+      log("info", "eve_delivery_admitted", { registrationId: agent.id, eventId: reference.eventId });
+    }
+    await this.#queue.sendReconciliation(reference);
+  }
+
+  async #publish(input: unknown): Promise<void> {
+    const parsed = actionJobSchema.safeParse(input);
+    if (!parsed.success) { log("warn", "invalid_outbox_job"); return; }
+    const { action, queuedAt } = parsed.data;
+    const agent = this.#agents.get(action.registrationId);
+    if (!agent || agent.namespace !== action.namespace) { log("warn", "outbox_registration_retired"); return; }
+    if (action.kind === "typing" && Date.now() - queuedAt > typingLifetimeMs) return;
+    const active = this.#active.get(agent.id);
+    if (!active || !this.#isLive(active)) throw new Error("Waiting for an authenticated Buzz connection");
+    const id = actionId(action);
+    const path = `${agent.namespace}/outbox/${id}.json`;
+    const record = await this.#state.read<DeliveryRecord>(deliveryPath(action));
+    if (!record || !deliveryAllowed(agent, record.value)) return;
+    const { target } = record.value;
+    let saved = action.kind === "typing" ? null : await this.#state.read<PublishedAction>(path);
+    if (saved?.value.published || saved?.value.rejected) return;
+    if (!saved && action.kind !== "typing") {
+      const event = active.socket.signer.sign(actionEvent(action, target, queuedAt));
+      await this.#state.create<PublishedAction>(path, { event }, receiptRetentionDays);
+      saved = await this.#state.read<PublishedAction>(path);
+      if (saved?.value.published || saved?.value.rejected) return;
+      if (!saved?.value.event) throw new Error("Signed publish record unavailable");
+    }
+    if (!this.#isLive(active)) throw new Error("Relay lease expired before publish");
+    const event = saved?.value.event ?? active.socket.signer.sign(actionEvent(action, target, queuedAt));
+    try {
+      await active.socket.publish(event);
+    } catch (error) {
+      if (!(error instanceof RelayRejectedError) || !error.permanent) throw error;
+      if (saved) await this.#state.replace<PublishedAction>(path, { rejected: true }, saved.etag, receiptRetentionDays);
+      log("warn", "buzz_publish_rejected", { registrationId: agent.id, eventId: action.eventId, actionId: id, kind: action.kind });
+      return;
+    }
+    if (saved) {
+      const updated = await this.#state.replace<PublishedAction>(path, { published: true }, saved.etag, receiptRetentionDays);
+      if (!updated) throw new Error("Publish receipt changed concurrently");
+    }
+    log(action.kind === "typing" ? "debug" : "info", "buzz_action_published", {
+      registrationId: agent.id, eventId: action.eventId, actionId: id, kind: action.kind,
+    });
+  }
+}
+
+function deliveryAllowed(agent: Agent, record: DeliveryRecord): boolean {
+  const { delivery, target } = record;
+  if (delivery.direct) return agent.directMessages.some(room => room.channelId === target.channelId && room.authors.includes(target.author));
+  return agent.channels.includes(target.channelId);
+}
+
+async function updateDelivery(state: State, path: string, update: (record: DeliveryRecord) => DeliveryRecord): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const entry = await state.read<DeliveryRecord>(path);
+    if (!entry) throw new Error("Delivery receipt disappeared");
+    if (await state.replace(path, update(entry.value), entry.etag, receiptRetentionDays)) return;
+  }
+  throw new Error("Delivery receipt changed concurrently");
+}
+
+async function pause(ms: number, signal: AbortSignal): Promise<void> {
+  try { await sleep(ms, undefined, { signal }); } catch (error) { if (!signal.aborted) throw error; }
+}
