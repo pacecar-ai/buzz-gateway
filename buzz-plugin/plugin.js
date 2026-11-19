@@ -278,11 +278,12 @@ export function apply(ctx) {
     const state = useModel(), roster = useRoster();
     const [busy, setBusy] = React.useState("");
     const [feedback, setFeedback] = React.useState("");
+    const [confirmation, setConfirmation] = React.useState("");
     const [value, setValue] = React.useState("");
     const invitation = navigation?.target?.route?.params?.invitation;
     const identity = scopeKey();
     React.useEffect(() => {
-      setFeedback(""); setValue(""); setBusy("");
+      setFeedback(""); setConfirmation(""); setValue(""); setBusy("");
       if (invitationPattern.test(invitation || "")) void load(invitation);
     }, [invitation, identity]);
     const hosted = roster.agents.filter(agent => agent.type === type && agent.owner === scope().owner && relayOrigin(agent.relay) === scope().community);
@@ -296,7 +297,7 @@ export function apply(ctx) {
       const rows = Array.isArray(selected) ? selected : [selected];
       const before = identity;
       const fresh = rows.filter(row => !row.approved);
-      setBusy(rows[0].pubkey); setFeedback(""); setValue("");
+      setBusy(rows[0].pubkey); setFeedback(""); setConfirmation(""); setValue("");
       const controller = new AbortController();
       const valid = () => alive && scopeKey() === before && !controller.signal.aborted;
       const off = ctx.communityReader.subscribe(() => { if (scopeKey() !== before) controller.abort(); });
@@ -316,6 +317,8 @@ export function apply(ctx) {
           if (row.native?.unfinished) await ctx.agents.finish(row.pubkey);
           else await ctx.agents.create({ type, name: row.name, ...(row.picture && { picture: row.picture }), config: { id: row.id } });
         }
+        if (valid()) setConfirmation(rows.length === 1 ? rows[0].name + " is in Agents. Invite it to a room to start a conversation."
+          : "All " + rows.length + " selected agents are in Agents. Invite them to the rooms where you want them to work.");
       } catch (error) {
         if (valid()) setFeedback(error.name === "AbortError" ? "Sign-in was cancelled. You can connect again." : error.message);
       } finally {
@@ -331,7 +334,7 @@ export function apply(ctx) {
     const bulk = remaining.length > 1 && remaining.length <= 8 && state.expiresAt > Date.now() && ctx.host.prepareRemoteAgentAuthorization;
     async function syncProfile(row) {
       if (!active() || disabled) return;
-      setBusy(row.pubkey); setFeedback("");
+      setBusy(row.pubkey); setFeedback(""); setConfirmation("");
       try { await ctx.agents.save(row.native.key, { name: row.name, picture: row.picture ?? null }); }
       catch (error) { setFeedback(error.message); }
       finally { setBusy(""); }
@@ -343,12 +346,15 @@ export function apply(ctx) {
           : "Open your team’s Vercel setup link to add agents to this community.")),
       state.loading && h("p", { role: "status" }, "Loading your connectors…"),
       (state.error || feedback) && h("p", { role: "alert" }, state.error || feedback),
+      confirmation && h("p", { role: "status" }, confirmation),
       visible.length > 0 && h("ul", { style: { ...stack, gap: 0, listStyle: "none", padding: 0, margin: 0 } },
         visible.map(row => {
           const listed = row.native && !row.native.unfinished;
           const canConnect = row.id && state.invitation && state.expiresAt > Date.now();
-          const changed = listed && canConnect && (row.native.name !== row.name || (row.native.picture || "") !== (row.picture || ""));
-          const status = listed ? (row.unavailable ? "In Agents · Check connection" : row.online ? "In Agents · Online" : "In Agents")
+          const changed = listed && canConnect && !row.unavailable &&
+            (row.native.name !== row.name || (row.native.picture || "") !== (row.picture || ""));
+          const status = row.retry ? "Connection unavailable · Refresh to retry"
+            : listed ? (row.unavailable ? "In Agents · Check connection" : row.online ? "In Agents · Online" : "In Agents")
             : row.unavailable ? "Buzz declined this grant" : !canConnect ? "Open a new setup link to connect" : row.approved ? "Approved · Ready to add" : "Needs your approval";
           return h("li", { key: row.pubkey, style: { display: "flex", gap: ".85rem", alignItems: "center", flexWrap: "wrap",
             padding: "1rem 0", borderBottom: "1px solid var(--color-border-subtle, #85858555)" } },

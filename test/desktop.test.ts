@@ -62,6 +62,25 @@ function fixture(ids: string[]) {
 }
 
 const callback = "http://127.0.0.1:49152/buzz/" + "d".repeat(32);
+test("one unavailable Vercel connector does not block approval for its neighbors", async () => {
+  const f = fixture(["first", "second"]);
+  const ref = await createHandoff([...f.agents.values()], f.state, Date.now() + 60_000);
+  const credential = f.services.credential;
+  f.services.credential = async id => {
+    if (id === "scl_first") throw new Error("fixture credential unavailable");
+    return credential(id);
+  };
+  const list = await f.post(ref, { step: "list" });
+  assert.equal(list.status, 200);
+  const [first, second] = (await list.json()).agents;
+  assert.equal(first.name, "first");
+  assert.equal(first.picture, "https://example.org/portrait.png");
+  assert.equal(first.unavailable, true);
+  assert.equal(first.retry, true);
+  assert.equal(second.unavailable, false);
+  assert.equal((await f.post(ref, { step: "approve", ...f.proof(f.agents.get("second")!) })).status, 200);
+});
+
 test("one desktop sign-in approves separately signed connectors and preserves completed grants on retry", async () => {
   const f = fixture(["one", "two", "three"]);
   const issue = await (await f.post(f.operator, { step: "invite", id: "one", all: true })).json();

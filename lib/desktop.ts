@@ -110,15 +110,23 @@ export async function handleDesktop(request: Request, agents: Map<string, Agent>
     if (body.step === "list") {
       const heart = (await state.read<{ at: number; online?: string[] }>(healthPath))?.value;
       const rows = await Promise.all(members.map(async agent => {
-        const credential = await services.credential(agent.credentialConnector!);
-        const key = signingKey(credential.signingKey, agent.pubkey);
-        const grant = credential.federated ?? await readDesktopGrant(agent, key, state);
-        if (grant && grant.ownerPubkey !== invite.owner) throw new Error("Connector owner changed");
-        const online = Boolean(heart && Date.now() - heart.at < 180_000 && heart.online?.includes(agent.id));
-        const unavailable = Boolean(grant && !online && !await services.usable(agent, key, grant));
-        return { ...await services.profile(agent.credentialConnector!), id: agent.id, pubkey: agent.pubkey,
-          manageUrl: "https://vercel.com/" + agent.eveProject.teamSlug + "/" + agent.desktop!.projectSlug + "/connect/" + agent.credentialConnector,
-          approved: Boolean(grant) && !unavailable, online, unavailable };
+        const connector = agent.credentialConnector!;
+        const identity = { id: agent.id, pubkey: agent.pubkey,
+          manageUrl: "https://vercel.com/" + agent.eveProject.teamSlug + "/" + agent.desktop!.projectSlug + "/connect/" + connector };
+        let profile: { name: string; picture?: string } = { name: agent.id };
+        try {
+          profile = await services.profile(connector);
+          const credential = await services.credential(connector);
+          const key = signingKey(credential.signingKey, agent.pubkey);
+          const grant = credential.federated ?? await readDesktopGrant(agent, key, state);
+          if (grant && grant.ownerPubkey !== invite.owner) throw new Error("Connector owner changed");
+          const online = Boolean(heart && Date.now() - heart.at < 180_000 && heart.online?.includes(agent.id));
+          const unavailable = Boolean(grant && !online && !await services.usable(agent, key, grant));
+          return { ...identity, ...profile, approved: Boolean(grant) && !unavailable, online, unavailable };
+        } catch (error) {
+          log("warn", "buzz_desktop_connector_unavailable", { registrationId: agent.id, error: errorName(error) });
+          return { ...identity, ...profile, approved: false, online: false, unavailable: true, retry: true };
+        }
       }));
       return reply({ agents: rows, expiresAt: invite.expiresAt });
     }
