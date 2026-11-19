@@ -10,6 +10,7 @@ Inspired by [eve's Discord Gateway relay](https://eve.dev/docs/channels/discord/
 flowchart LR
     Buzz["Buzz relay"]
     Eve["eve agent project"]
+    Connect["Vercel Connect · optional"]
     subgraph Gateway["Buzz Gateway · one Vercel project"]
         Daemon["buzz-gateway<br/>Vercel Daemon"]
         API["buzz-gateway-api<br/>Vercel Functions"]
@@ -25,6 +26,7 @@ flowchart LR
     Buzz <-->|"WebSocket · NIP-42 and signed events"| Daemon
     Daemon -->|"HTTPS · Vercel OIDC"| Eve
     Eve -->|"POST /api/actions · Vercel OIDC"| API
+    Eve -.->|"Request callback key"| Connect
 ```
 
 The daemon holds a relay socket per agent identity and uses the inbox to deliver events to eve. The action Function checks the caller's Vercel project identity and enqueues replies. The daemon derives the room and thread from the original event, signs the reply, and publishes it. Vercel Queues retains jobs for up to one day. Private Blob stores leases, checkpoints, and delivery metadata. Pending signed replies stay in Blob until the relay acknowledges them, with a two-day expiry. eve manages agent sessions in its own project.
@@ -70,7 +72,29 @@ export default createBuzzChannel({
 
 Set `BUZZ_GATEWAY_ORIGIN` to the gateway's HTTPS production origin and `BUZZ_GATEWAY_PROJECT` to its project identity, using the same fields as `eveProject` below. Omit `acknowledgmentReaction` for typing and replies only. Deploy the eve project. The channel adds `POST /integrations/buzz/events` and `POST /integrations/buzz/result`. Both validate the gateway's Vercel OIDC token.
 
-Use Vercel production origins where the application can receive calls without an interactive login. Where deployment protection is enabled, use an existing approved machine access policy for both origins.
+Use your projects' Vercel production origins. If the eve deployment is protected, add the gateway as a [Trusted Source](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/trusted-sources) on the eve project with a Production-to-Production rule. If the gateway deployment is protected, give the eve project the corresponding rule on the gateway. The gateway and channel send the OIDC token in the Trusted Sources header as well as the application authorization header.
+
+### Use Vercel Connect for callbacks
+
+Create a [Vercel Connect API Key connector](https://vercel.com/connect/api-key) named `buzz-gateway` using your gateway's hostname as the service. Generate a random 32-byte callback key, enter its hex representation as the connector's API key, and attach the connector to the consuming eve projects' Production environments. Set `BUZZ_GATEWAY_ACTION_KEY_SHA256` to the lowercase hex SHA-256 hash of that exact key string in the gateway's Production environment, then redeploy.
+
+In the eve project, install `@vercel/connect`, set `BUZZ_GATEWAY_CONNECTOR` to the UID shown by Vercel Connect, and pass the key resolver to `createBuzzChannel` alongside the origin and project identity.
+
+```ts
+import { getToken } from "@vercel/connect";
+import { createBuzzChannel } from "buzz-gateway/eve";
+
+const connector = process.env.BUZZ_GATEWAY_CONNECTOR;
+if (!connector) throw new Error("Set BUZZ_GATEWAY_CONNECTOR to the connector UID");
+
+export default createBuzzChannel({
+  gatewayUrl: process.env.BUZZ_GATEWAY_ORIGIN ?? "",
+  gatewayProject: JSON.parse(process.env.BUZZ_GATEWAY_PROJECT ?? "{}"),
+  actionKey: () => getToken(connector, { subject: { type: "app" } }),
+});
+```
+
+The gateway requires the configured callback key alongside the agent project's OIDC identity. The daemon continues to sign Buzz events with each registration's own key.
 
 ### Register the Buzz identity
 

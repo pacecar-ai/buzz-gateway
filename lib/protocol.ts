@@ -49,6 +49,7 @@ export const typingLifetimeMs = 10_000;
 export const eveDeliveryPath = "/integrations/buzz/events";
 export const eveResultPath = "/integrations/buzz/result";
 export const actionPath = "/api/actions";
+export const actionKeyHeader = "x-buzz-gateway-key";
 export const healthPath = "gateway/daemon-health.json";
 
 export function stableId(...parts: string[]): string {

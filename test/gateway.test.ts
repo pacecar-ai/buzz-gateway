@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event } from "nostr-tools/pure";
@@ -6,7 +7,7 @@ import { WebSocketServer } from "ws";
 import { acceptAction } from "../lib/actions.ts";
 import { loadAgents } from "../lib/config.ts";
 import {
-  actionId, deliveryPath, deliverySchema, eveDeliveryPath, eveResultPath, healthPath,
+  actionId, actionKeyHeader, deliveryPath, deliverySchema, eveDeliveryPath, eveResultPath, healthPath,
   inboxTopic, outboxTopic, stableId, type ActionJob, type Delivery,
 } from "../lib/protocol.ts";
 import type { InboxJob } from "../lib/queue.ts";
@@ -136,14 +137,17 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     assert.equal(path, eveDeliveryPath);
     const delivery = deliverySchema.parse(input);
     admissions.push(delivery);
-    const request = () => new Request("https://gateway.example.com/api/actions", {
+    const key = "fixture-callback-key";
+    const keyDigest = createHash("sha256").update(key).digest("hex");
+    const request = (actionKey: string) => new Request("https://gateway.example.com/api/actions", {
       method: "POST",
-      headers: { authorization: "Bearer fixture-credential", "content-type": "application/json" },
+      headers: { authorization: "Bearer fixture-credential", "content-type": "application/json", [actionKeyHeader]: actionKey },
       body: JSON.stringify({ ...delivery, kind: "reply", text: "fixture private reply" }),
     });
-    assert.equal((await acceptAction(request(), agents, state, queue, async () => false)).status, 403);
-    assert.equal((await acceptAction(request(), agents, state, queue, async () => true)).status, 202);
-    assert.equal((await acceptAction(request(), agents, state, queue, async () => true)).status, 202);
+    assert.equal((await acceptAction(request(key), agents, state, queue, async () => false, keyDigest)).status, 403);
+    assert.equal((await acceptAction(request("invalid"), agents, state, queue, async () => true, keyDigest)).status, 403);
+    assert.equal((await acceptAction(request(key), agents, state, queue, async () => true, keyDigest)).status, 202);
+    assert.equal((await acceptAction(request(key), agents, state, queue, async () => true, keyDigest)).status, 202);
     return Response.json({ sessionId: "test-session", deliveryId: "test-delivery" }, { status: 202 });
   });
   const stop = new AbortController();
@@ -168,7 +172,7 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: unauthorizedRoom.id })), null);
     const entries = logs.mock.calls.map(call => call.arguments[0]);
     assert(entries.some(line => line.includes("buzz_action_published") && line.includes(question.id)));
-    assert(entries.every(line => !/fixture private|fixture-credential/.test(line)));
+    assert(entries.every(line => !/fixture private|fixture-credential|fixture-callback-key/.test(line)));
   } finally {
     stop.abort();
     for (const socket of relay.clients) socket.terminate();

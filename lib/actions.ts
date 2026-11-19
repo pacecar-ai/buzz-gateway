@@ -1,4 +1,4 @@
-import { fromProject } from "./auth.ts";
+import { fromProject, matchesActionKey } from "./auth.ts";
 import type { Agent } from "./config.ts";
 import { errorName, log } from "./log.ts";
 import { actionId, actionSchema, deliveryPath, readJson } from "./protocol.ts";
@@ -11,6 +11,7 @@ export async function acceptAction(
   state: State,
   outbox: Outbox,
   authorize = fromProject,
+  actionKeyDigest = process.env.BUZZ_GATEWAY_ACTION_KEY_SHA256,
 ): Promise<Response> {
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
   if (!request.headers.has("authorization")) return new Response(null, { status: 401 });
@@ -20,7 +21,8 @@ export async function acceptAction(
   if (!parsed.success) return new Response(null, { status: 400 });
   const action = parsed.data;
   const agent = agents.get(action.registrationId);
-  if (!agent || action.namespace !== agent.namespace || !await authorize(request, agent.eveProject)) {
+  if (!agent || action.namespace !== agent.namespace || !matchesActionKey(request, actionKeyDigest)
+      || !await authorize(request, agent.eveProject)) {
     log("debug", "action_unauthorized");
     return new Response(null, { status: 403 });
   }

@@ -1,6 +1,7 @@
 import { getVercelOidcToken } from "@vercel/oidc";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import type { ProjectIdentity } from "./protocol.ts";
+import { actionKeyHeader, type ProjectIdentity } from "./protocol.ts";
 
 const issuers = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
@@ -29,11 +30,24 @@ export async function fromProject(request: Request, project: ProjectIdentity): P
   }
 }
 
-export async function postToProject(baseUrl: string, path: string, body: unknown): Promise<Response> {
+export function matchesActionKey(request: Request, digest: string | undefined): boolean {
+  if (digest === undefined) return true;
+  const value = request.headers.get(actionKeyHeader);
+  return Boolean(value && value.length <= 128 && /^[a-f0-9]{64}$/.test(digest)
+    && timingSafeEqual(createHash("sha256").update(value).digest(), Buffer.from(digest, "hex")));
+}
+
+export async function postToProject(baseUrl: string, path: string, body: unknown, actionKey?: string): Promise<Response> {
   const token = await getVercelOidcToken();
+  const headers = new Headers({
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    "x-vercel-trusted-oidc-idp-token": token,
+  });
+  if (actionKey) headers.set(actionKeyHeader, actionKey);
   return fetch(new URL(path, baseUrl), {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(12_000),
     redirect: "error",

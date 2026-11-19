@@ -15,6 +15,7 @@ const optionsSchema = z.object({
       && !url.search && !url.hash;
   }, "Expected the HTTPS origin of the Buzz Gateway project"),
   gatewayProject: projectIdentity,
+  actionKey: z.custom<() => Promise<string>>(value => typeof value === "function").optional(),
   acknowledgmentReaction: z.string().trim().min(1).max(24).optional(),
 });
 const resultRequest = deliveryReferenceSchema.extend({ receipt: receiptSchema });
@@ -28,7 +29,7 @@ export function createBuzzChannel(input: BuzzChannelOptions) {
   async function publish(reference: Reference, output: ResponseAction): Promise<void> {
     const { registrationId, namespace, eventId } = reference;
     const action: Action = { version: 1, registrationId, namespace, eventId, ...output };
-    const response = await postToProject(options.gatewayUrl, actionPath, action);
+    const response = await postToProject(options.gatewayUrl, actionPath, action, await options.actionKey?.());
     if (response.status !== 202) throw new Error(`Gateway action unavailable (${response.status})`);
   }
 
