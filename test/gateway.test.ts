@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { SignJWT } from "jose";
 import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event } from "nostr-tools/pure";
 import { WebSocketServer } from "ws";
+import { handleEnrollment } from "../api/enroll.ts";
 import { acceptAction } from "../lib/actions.ts";
 import { loadAgents } from "../lib/config.ts";
 import { CredentialRefusedError, loadSigner } from "../lib/credentials.ts";
@@ -109,6 +110,10 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
   const group = (kind: number, tags: string[][], key = relayKey) => finalizeEvent({ kind, created_at, tags, content: "" }, key);
   const challenge = "fixture-challenge";
   const reply = Promise.withResolvers<Event>();
+  const profile = { name: "Fixture", description: "Test agent", picture: "https://example.com/portrait.png" };
+  const publishedProfiles: Event[] = [];
+  const key = "fixture-callback-key";
+  const digest = (value: string) => createHash("sha256").update(value).digest("hex");
   const relayUrl = `ws://127.0.0.1:${address.port}/`;
   relay.on("connection", socket => {
     socket.send(JSON.stringify(["AUTH", challenge]));
@@ -153,6 +158,7 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
           // An already-stored publish after a lost ACK must also settle the outbox action.
           socket.send(JSON.stringify(["OK", event.id, event.kind !== 9, event.kind === 9 ? "duplicate: stored" : ""]));
           if (event.kind === 9) reply.resolve(event);
+          if (event.kind === 0 || event.kind === 10100) publishedProfiles.push(event);
         }
       } catch (error) {
         reply.reject(error);
@@ -168,6 +174,8 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
     eveUrl: "https://eve.example.com",
     eveProject: { teamSlug: "example", teamId: "team_example", projectId: "prj_agent" },
     roomAccess: "membership",
+    profile,
+    actionKeyDigest: digest(key),
   }]) });
   const state = new MemoryState();
   const queue = new MemoryQueue();
@@ -181,15 +189,14 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
     assert.equal(path, eveDeliveryPath);
     const delivery = deliverySchema.parse(input);
     admissions.push(delivery);
-    const key = "fixture-callback-key";
-    const keyDigest = createHash("sha256").update(key).digest("hex");
+    const keyDigest = digest("legacy-gateway-key");
     const request = (actionKey: string) => new Request("https://gateway.example.com/api/actions", {
       method: "POST",
       headers: { authorization: "Bearer fixture-credential", "content-type": "application/json", [actionKeyHeader]: actionKey },
       body: JSON.stringify({ ...delivery, kind: "reply", text: "fixture private reply" }),
     });
     assert.equal((await acceptAction(request(key), agents, state, queue, async () => false, keyDigest)).status, 403);
-    assert.equal((await acceptAction(request("invalid"), agents, state, queue, async () => true, keyDigest)).status, 403);
+    assert.equal((await acceptAction(request("legacy-gateway-key"), agents, state, queue, async () => true, keyDigest)).status, 403);
     assert.equal((await acceptAction(request(key), agents, state, queue, async () => true, keyDigest)).status, 202);
     assert.equal((await acceptAction(request(key), agents, state, queue, async () => true, keyDigest)).status, 202);
     return Response.json({ sessionId: "test-session", deliveryId: "test-delivery" }, { status: 202 });
@@ -204,6 +211,14 @@ test("routes an invited private Buzz room and publishes a signed threaded reply"
     assert(verifyEvent(event));
     assert.equal(event.pubkey, pubkey);
     assert.equal(event.content, "fixture private reply");
+    assert.deepEqual(publishedProfiles.map(event => event.kind), [0, 10100]);
+    for (const event of publishedProfiles) {
+      assert(verifyEvent(event));
+      assert.equal(event.pubkey, pubkey);
+      assert.deepEqual(JSON.parse(event.content), {
+        name: profile.name, display_name: profile.name, about: profile.description, picture: profile.picture,
+      });
+    }
     assert.deepEqual(event.tags, [["h", "test-room"], ["e", question.id, "", "reply"], ["p", question.pubkey]]);
     for (let i = 0; i < 30 && !logs.mock.calls.some(call => call.arguments[0].includes("buzz_action_published")); i += 1) {
       await pause(20);
@@ -289,6 +304,72 @@ test("resolves a scoped Buzz grant from Connect and requests a relay-bound asser
   assert.equal(signer.assertion?.expiresAt, expires * 1000);
   audience = "https://another-community.example.com";
   await assert.rejects(loadSigner(agent), CredentialRefusedError);
+});
+
+test("authorizes one hosted Buzz installation and keeps credentials with the operator", async t => {
+  const origin = "https://gateway.example.com";
+  const adapter = "https://identity.example.com/api";
+  const ownerPubkey = getPublicKey(generateSecretKey());
+  const invite = "a".repeat(43), operator = "b".repeat(43);
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+  const config = JSON.stringify({
+    origin, adapter, ownerPubkey, operatorDigest: hash(operator), expiresAt: Date.now() + 60_000,
+    agents: [{ id: "fixture", name: "Fixture agent", inviteDigest: hash(invite) }],
+  });
+  const state = new MemoryState();
+  const post = (step: string, token = invite, fields = {}, requestOrigin = origin) =>
+    handleEnrollment(new Request(`${origin}/api/enroll`, {
+      method: "POST",
+      headers: { origin: requestOrigin, authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: "fixture", step, ...fields }),
+    }), config, state);
+  const view = await (await post("view")).json();
+  assert.equal(view.name, "Fixture agent");
+  assert.match(view.pubkey, /^[a-f0-9]{64}$/);
+  assert.equal((await post("start", invite, {}, "https://other.example")).status, 403);
+  assert.equal((await post("collect")).status, 403);
+  const start = new URL((await (await post("start")).json()).url);
+  const redirect = start.searchParams.get("return_to");
+  assert(redirect?.startsWith("http://127.0.0.1:"));
+  assert.equal(start.searchParams.get("handoff_challenge_method"), "S256");
+  const proof = ["auth", ownerPubkey, "", "a".repeat(128)];
+  assert.equal((await post("complete", invite, { proof, redirect: "https://other.example/?code=fixture" })).status, 400);
+
+  const expires_at = new Date(Date.now() + 60_000).toISOString();
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    assert.equal(init.redirect, "manual");
+    switch (url) {
+      case `${adapter}/v1/login/exchange`: {
+        const { code, handoff_secret } = JSON.parse(String(init.body));
+        assert.equal(code, "fixture");
+        assert.equal(createHash("sha256").update(handoff_secret).digest("base64url"), start.searchParams.get("handoff_challenge"));
+        return Response.json({ session_token: "fixture-session", expires_at });
+      }
+      case `${adapter}/v1/session`:
+        assert.equal(new Headers(init.headers).get("authorization"), "Bearer fixture-session");
+        return Response.json({ expires_at });
+      case `${adapter}/v1/nip-fi/agent-grant`: {
+        const form = new URLSearchParams(String(init.body));
+        assert.equal(form.get("agent_pubkey"), view.pubkey);
+        assert.equal(form.get("owner_attestation"), JSON.stringify(proof));
+        assert.equal(form.get("subject_token"), "fixture-session");
+        return Response.json({
+          access_token: "fixture-issued-grant", issued_token_type: "urn:nostr:params:oauth:token-type:nip-fi-agent-grant",
+          token_type: "N_A", nostr_owner_pubkey: ownerPubkey, nip_fi_issuer: "https://issuer.example.com",
+        });
+      }
+      default: throw new Error("Unexpected request");
+    }
+  });
+  const done = await post("complete", invite, { proof, redirect: `${redirect}?code=fixture` });
+  assert.equal(done.status, 200);
+  assert.deepEqual(await done.json(), { ...view, authorized: true });
+  const result = await (await post("collect", operator)).json();
+  assert.equal(result.pubkey, view.pubkey);
+  assert.equal(result.credential.federated.grant, "fixture-issued-grant");
+  assert.match(result.credential.actionKey, /^[0-9a-f]{64}$/);
+  assert.equal((await post("clear", operator)).status, 200);
+  assert.deepEqual(await (await post("collect", operator)).json(), { status: "collected" });
 });
 
 test("Blob and Queues read a newly rotated daemon OIDC token", async t => {

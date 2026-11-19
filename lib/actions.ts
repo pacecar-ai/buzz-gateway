@@ -21,7 +21,7 @@ export async function acceptAction(
   if (!parsed.success) return new Response(null, { status: 400 });
   const action = parsed.data;
   const agent = agents.get(action.registrationId);
-  if (!agent || action.namespace !== agent.namespace || !matchesActionKey(request, actionKeyDigest)
+  if (!agent || action.namespace !== agent.namespace || !matchesActionKey(request, agent.actionKeyDigest ?? actionKeyDigest)
       || !await authorize(request, agent.eveProject)) {
     log("debug", "action_unauthorized");
     return new Response(null, { status: 403 });

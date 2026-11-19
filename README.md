@@ -115,7 +115,17 @@ jq --arg projectId prj_example '. + {
   vercel api /v1/connect/connectors -X POST --input -
 ```
 
-Attach each identity credential only to the gateway's Production environment. Remove the temporary credential files after the connector is linked. The daemon exchanges each grant for a short-lived assertion for its registered relay and renews the assertion on reconnect. If a grant expires or is revoked, enroll again through the identity adapter. The credential value contains a signing key and the adapter's agent grant in the fields `signingKey` and `federated: { grant, issuer, ownerPubkey }`.
+Attach each identity credential to the gateway's Production environment. Remove the temporary credential files after the connector is linked. The daemon exchanges each grant for a short-lived assertion for its registered relay and renews the assertion on reconnect. If a grant expires or is revoked, enroll again through the identity adapter. The credential value contains a signing key and the adapter's agent grant in the fields `signingKey` and `federated: { grant, issuer, ownerPubkey }`.
+
+To use one connector for a specific agent's identity and replies, link it to that agent's eve Production project as well. Read its JSON `actionKey` in the eve adapter's `actionKey` callback. Put the SHA-256 digest of that value in the registration's `actionKeyDigest`. This digest takes precedence over the gateway-wide callback digest.
+
+#### Authorize from another computer
+
+To offer links hosted by your gateway, set the Production variable `BUZZ_GATEWAY_ENROLLMENT` for a short setup window. Supply the gateway HTTPS `origin`, Buzz identity `adapter` base URL, expected `ownerPubkey`, an `expiresAt` timestamp in epoch milliseconds, and an `operatorDigest`. For each entry in `agents`, supply `id`, `name`, optional HTTPS `picture`, and `inviteDigest`. Generate a separate random 32-byte base64url token for each invitation and another for operator access. Store their SHA-256 digests in the plan. Redeploy.
+
+Send the owner `<origin>/api/enroll#<agent-id>.<invite-token>`. The page shows the agent key to authorize in Buzz Desktop and starts Builderlab sign-in. When the browser returns to the loopback address, the owner pastes that address into the setup page. The gateway exchanges its single-use code with Buzz.
+
+POST `{"id":"<agent-id>","step":"collect"}` to `/api/enroll` with the operator bearer token to retrieve that agent's connector credential. After saving it in Vercel Connect, POST the same request with `"step":"clear"`. The authorization service keeps temporary records in private Blob for a day. Keep the invite and operator tokens private, and remove the plan after enrollment.
 
 For a relay that supports direct agent membership, provision the identity on that relay. The connector value can contain just `{"signingKey":"<hex or nsec>"}`. For NIP-AA virtual membership, include the signed JSON `ownerAttestation` array as well. Self-hosted relays can also supply those credentials through `signingKeyEnv` and optional `ownerAttestationEnv`. [Buzz relay reference](https://github.com/block/buzz/blob/main/NOSTR.md)
 
@@ -145,7 +155,7 @@ Set `BUZZ_GATEWAY_AGENTS` as a JSON array in the gateway's Production environmen
 - Set `federatedIdentityAdapter` to the community's adapter base URL when the relay requires federated sign-in. Omit that property for direct or NIP-AA membership.
 - With `roomAccess: "membership"`, the gateway verifies the relay's signed private-room metadata and member lists. Invite or remove the agent in Buzz. The agent responds to mentions and follow-ups in joined threads and uses one session per Buzz DM room.
 - Existing registrations with `channels` and `directMessages` still use their configured room access. To switch an existing registration, set `roomAccess` to `membership` and remove those fields.
-- `profile` optionally sets the agent's Buzz `name` and `description`. Omit it if the profile is already managed on the relay.
+- `profile` optionally sets the agent's Buzz `name`, `description`, and HTTPS `picture`. Omit it if the profile is already managed on the relay.
 - `issuerMode` follows the target Vercel team's OIDC issuer setting. Use `global` for the global issuer.
 
 Redeploy the gateway after editing registrations. Check that health reports `relay: "connected"`, then invite and mention the agent in a private Buzz channel. Room membership changes take effect as the daemon refreshes the signed records. A degraded relay status means some registrations still need attention. To uninstall, remove the identity from Buzz, revoke its grant with the adapter, and remove its registration and Connect link.

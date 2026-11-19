@@ -188,7 +188,12 @@ export class GatewayWorker {
       log("info", "relay_authenticated", { registrationId: agent.id, rooms: channels.length });
       if (agent.profile) {
         // The optional configuration makes the gateway the publisher for this agent's profile.
-        const profile = JSON.stringify({ name: agent.profile.name, display_name: agent.profile.name, about: agent.profile.description });
+        const profile = JSON.stringify({
+          name: agent.profile.name,
+          display_name: agent.profile.name,
+          about: agent.profile.description,
+          picture: agent.profile.picture,
+        });
         await socket.publish(signer.sign({ kind: 0, tags: [], content: profile, created_at: issuerEpoch() }));
         await socket.publish(signer.sign({ kind: 10100, tags: [], content: profile, created_at: issuerEpoch() }));
       }

@@ -24,9 +24,14 @@ export const agentSchema = z.object({
   credentialConnector: z.string().trim().min(1).max(512).optional(),
   federatedIdentityAdapter: urlFor(["https:"]).optional(),
   // An existing Buzz profile can be managed by the relay operator instead.
-  profile: z.object({ name, description: z.string().max(400).default("") }).optional(),
+  profile: z.object({
+    name,
+    description: z.string().max(400).default(""),
+    picture: urlFor(["https:"]).optional(),
+  }).optional(),
   eveUrl: urlFor(["https:"]).refine(value => new URL(value).pathname === "/", "Expected the eve deployment origin"),
   eveProject: projectIdentity,
+  actionKeyDigest: hexId.optional(),
   roomAccess: z.enum(["configured", "membership"]).default("configured"),
   channels: z.array(channelId).max(100).default([]),
   directMessages: z.array(z.object({ channelId, authors: z.array(hexId).min(1).max(64) })).max(100).default([]),

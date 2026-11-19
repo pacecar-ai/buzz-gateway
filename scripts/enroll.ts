@@ -1,23 +1,13 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { z } from "zod";
-import { nostrAuthorization } from "../lib/credentials.ts";
-import { hexId, registrationId } from "../lib/protocol.ts";
+import { enrollAgent, EnrollmentRefused, exchangeLogin, loginUrl, ownerProof } from "../lib/enrollment.ts";
+import { registrationId } from "../lib/protocol.ts";
 
-const grantType = "urn:nostr:params:oauth:token-type:nip-fi-agent-grant";
-const sessionSchema = z.object({ session_token: z.string().min(1).max(2048), expires_at: z.iso.datetime({ offset: true }) });
-const proofSchema = z.tuple([z.literal("auth"), hexId, z.string().max(2048), z.string().regex(/^[a-f0-9]{128}$/)]);
-const grantSchema = z.object({
-  access_token: z.string().regex(/^\S+$/).max(1024),
-  issued_token_type: z.literal(grantType),
-  token_type: z.literal("N_A"),
-  nostr_owner_pubkey: hexId,
-  nip_fi_issuer: z.url(),
-});
 const [baseUrl, ...ids] = process.argv.slice(2);
 const adapter = z.url().safeParse(baseUrl);
 if (!adapter.success || !ids.length || ids.length > 32 || new Set(ids).size !== ids.length
@@ -37,13 +27,13 @@ const agents = ids.map(id => {
 });
 const folder = await mkdtemp(join(tmpdir(), "buzz-gateway-enrollment-"));
 const secret = randomBytes(32).toString("base64url");
-const challenge = createHash("sha256").update(secret).digest("base64url");
 const path = `/install/${randomBytes(24).toString("base64url")}`;
 let origin: string;
-let session: z.infer<typeof sessionSchema> | undefined;
+let session: string | undefined;
 let busy = false;
 const server = createServer({ requestTimeout: 15_000 }, (request, response) => {
-  void handle(request, response).catch(() => {
+  void handle(request, response).catch(error => {
+    if (error instanceof EnrollmentRefused) console.error(error.message);
     page(response, 400, '<p>Enrollment could not finish. Verify the proof and sign-in, then <a href="'.concat(path, '">try again</a>.</p>'));
   });
 });
@@ -64,15 +54,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   if (request.method === "GET" && url.pathname === `${path}/return`) {
     const code = z.string().min(1).max(2048).parse(url.searchParams.get("code"));
-    const next = sessionSchema.parse(await send("login/exchange", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code, handoff_secret: secret }),
-    }));
-    const info = z.object({ expires_at: z.iso.datetime({ offset: true }) }).parse(await send("session", {
-      headers: { authorization: `Bearer ${next.session_token}` },
-    }));
-    if (Date.parse(info.expires_at) !== Date.parse(next.expires_at) || Date.parse(next.expires_at) <= Date.now()) throw new Error();
-    session = next;
+    session = await exchangeLogin(base.href, code, secret);
     response.writeHead(303, { location: path, "referrer-policy": "no-referrer", "cache-control": "no-store" }).end();
     return;
   }
@@ -81,15 +63,12 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     return;
   }
   if (request.method === "GET") {
-    const login = new URL(endpoint("login/start"));
-    login.search = new URLSearchParams({
-      return_to: `${origin}${path}/return`, handoff_challenge: challenge, handoff_challenge_method: "S256",
-    }).toString();
+    const login = loginUrl(base.href, `${origin}${path}/return`, secret);
     const fields = agents.map(agent => `<p><strong>${agent.id}</strong> <code>${agent.pubkey}</code></p>
       ${agent.complete ? "<p>Grant issued.</p>" : `<label>Ownership proof for ${agent.id} <input name="${agent.id}" type="password" autocomplete="off" required></label>`}`).join("");
     const body = session
       ? `<p>In Buzz Desktop, open Settings → Buzz → Security → Authorize external identity. Authorize each public key and paste its proof below.</p><form method="post">${fields}<p><button>Create agent grants</button></p></form>`
-      : `<p>Sign in with the account linked to your Buzz identity.</p><p><a href="${login.href.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">Sign in</a></p>`;
+      : `<p>Sign in with the account linked to your Buzz identity.</p><p><a href="${login.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">Sign in</a></p>`;
     page(response, 200, body);
     return;
   }
@@ -106,26 +85,14 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     }
     const form = new URLSearchParams(body);
     const pending = agents.filter(agent => !agent.complete).map(agent => ({
-      agent, proof: proofSchema.parse(JSON.parse(form.get(agent.id) ?? "null")),
+      agent, proof: ownerProof.parse(JSON.parse(form.get(agent.id) ?? "null")),
     }));
     for (const { agent, proof } of pending) {
-      const target = "nip-fi/agent-grant";
-      const grantBody = new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-        subject_token: session.session_token,
-        subject_token_type: "urn:nostr:params:oauth:token-type:nip-fa-session",
-        requested_token_type: grantType,
-        agent_pubkey: agent.pubkey,
-        owner_attestation: JSON.stringify(proof),
-      }).toString();
-      const grant = grantSchema.parse(await send(target, { method: "POST", headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        "nostr-authorization": nostrAuthorization(endpoint(target), grantBody, template => finalizeEvent(template, agent.key)),
-      }, body: grantBody }));
-      if (grant.nostr_owner_pubkey !== proof[1] || grant.nostr_owner_pubkey === agent.pubkey) throw new Error();
+      const signingKey = Buffer.from(agent.key).toString("hex");
       const credential = {
-        signingKey: Buffer.from(agent.key).toString("hex"),
-        federated: { grant: grant.access_token, issuer: grant.nip_fi_issuer, ownerPubkey: grant.nostr_owner_pubkey },
+        signingKey,
+        actionKey: randomBytes(32).toString("hex"),
+        federated: await enrollAgent(base.href, session, signingKey, proof),
       };
       await writeFile(join(folder, `${agent.id}.json`), JSON.stringify({
         values: [{ key: "apiKey", value: JSON.stringify(credential) }],
@@ -138,19 +105,6 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   } finally {
     busy = false;
   }
-}
-
-function endpoint(name: string): string {
-  return `${base.href.replace(/\/$/, "")}/v1/${name}`;
-}
-
-async function send(name: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(endpoint(name), { ...init, redirect: "manual", signal: AbortSignal.timeout(10_000) });
-  if (!response.ok) {
-    console.error(`Buzz identity request failed with HTTP ${response.status}.`);
-    throw new Error("Buzz identity request failed");
-  }
-  return response.json();
 }
 
 function page(response: ServerResponse, status: number, content: string): void {
