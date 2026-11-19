@@ -11,6 +11,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event
 import { WebSocketServer } from "ws";
 import { acceptAction } from "../lib/actions.ts";
 import { loadAgents } from "../lib/config.ts";
+import { CredentialRefusedError, loadSigner } from "../lib/credentials.ts";
 import {
   actionId, actionKeyHeader, deliveryPath, deliverySchema, eveDeliveryPath, eveResultPath, healthPath,
   inboxTopic, outboxTopic, stableId, type ActionJob, type Delivery,
@@ -76,10 +77,18 @@ class MemoryQueue {
   }
 }
 
-test("authenticates to Buzz, authorizes the eve action, and publishes a signed threaded reply", { timeout: 15_000 }, async t => {
-  const relay = new WebSocketServer({ host: "127.0.0.1", port: 0 });
-  await new Promise<void>((resolve, reject) => relay.once("listening", resolve).once("error", reject));
-  const address = relay.address();
+test("routes an invited private Buzz room and publishes a signed threaded reply", { timeout: 15_000 }, async t => {
+  const relayKey = generateSecretKey();
+  const relaySigningKey = getPublicKey(relayKey);
+  const server = createServer((request, response) => {
+    assert.equal(request.headers.accept, "application/nostr+json");
+    response.setHeader("content-type", "application/nostr+json");
+    response.end(JSON.stringify({ self: relaySigningKey }));
+  });
+  const relay = new WebSocketServer({ server });
+  server.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve, reject) => server.once("listening", resolve).once("error", reject));
+  const address = server.address();
   assert(address && typeof address !== "string");
   const botKey = generateSecretKey();
   const pubkey = getPublicKey(botKey);
@@ -91,6 +100,13 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
   const unauthorizedRoom = finalizeEvent({
     kind: 9, created_at, content: "other room", tags: [["h", "outside-room"], ["p", pubkey]],
   }, author);
+  const outsider = finalizeEvent({
+    kind: 9, created_at, content: "outsider", tags: [["h", "test-room"], ["p", pubkey]],
+  }, generateSecretKey());
+  const privateRoom = [["d", "test-room"], ["t", "stream"]];
+  const publicRoom = [["d", "public-room"], ["t", "stream"]];
+  const roomMembers = [["p", pubkey], ["p", getPublicKey(author)]];
+  const group = (kind: number, tags: string[][], key = relayKey) => finalizeEvent({ kind, created_at, tags, content: "" }, key);
   const challenge = "fixture-challenge";
   const reply = Promise.withResolvers<Event>();
   const relayUrl = `ws://127.0.0.1:${address.port}/`;
@@ -98,7 +114,7 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     socket.send(JSON.stringify(["AUTH", challenge]));
     socket.on("message", data => {
       try {
-        const [type, eventOrSubscription] = JSON.parse(String(data));
+        const [type, eventOrSubscription, filter] = JSON.parse(String(data));
         if (type === "AUTH") {
           const event: Event = eventOrSubscription;
           assert.equal(event.kind, 22242);
@@ -108,7 +124,26 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
           socket.send(JSON.stringify(["OK", event.id, true, ""]));
         }
         if (type === "REQ") {
-          for (const event of [unauthorizedRoom, question, question]) {
+          let events: Event[];
+          switch (filter.kinds[0]) {
+            case 39002:
+              assert.deepEqual(filter["#p"], [pubkey]);
+              assert.deepEqual(filter.authors, [relaySigningKey]);
+              events = [
+                group(39002, [...privateRoom, ...roomMembers]),
+                group(39002, [...publicRoom, ...roomMembers]),
+                group(39002, [["d", "outside-room"], ...roomMembers], author),
+              ];
+              break;
+            case 39000:
+              assert.deepEqual(filter["#d"], ["test-room", "public-room"]);
+              events = [group(39000, [...privateRoom, ["private"]]), group(39000, [...publicRoom, ["public"]])];
+              break;
+            default:
+              assert.deepEqual(filter["#h"], ["test-room"]);
+              events = [unauthorizedRoom, outsider, question, question];
+          }
+          for (const event of events) {
             socket.send(JSON.stringify(["EVENT", eventOrSubscription, event]));
           }
           socket.send(JSON.stringify(["EOSE", eventOrSubscription]));
@@ -132,7 +167,7 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     id: "test-agent", pubkey, relayUrl, signingKeyEnv: keyEnv,
     eveUrl: "https://eve.example.com",
     eveProject: { teamSlug: "example", teamId: "team_example", projectId: "prj_agent" },
-    channels: ["test-room"],
+    roomAccess: "membership",
   }]) });
   const state = new MemoryState();
   const queue = new MemoryQueue();
@@ -181,6 +216,7 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     assert(reconciled);
     assert(await state.read(healthPath));
     assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: unauthorizedRoom.id })), null);
+    assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: outsider.id })), null);
     const entries = logs.mock.calls.map(call => call.arguments[0]);
     assert(entries.some(line => line.includes("buzz_action_published") && line.includes(question.id)));
     assert(entries.every(line => !/fixture private|fixture-credential|fixture-callback-key/.test(line)));
@@ -189,8 +225,70 @@ test("authenticates to Buzz, authorizes the eve action, and publishes a signed t
     for (const socket of relay.clients) socket.terminate();
     await running;
     await new Promise<void>((resolve, reject) => relay.close(error => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     delete process.env[keyEnv];
   }
+});
+
+test("resolves a scoped Buzz grant from Connect and requests a relay-bound assertion", async t => {
+  const signingKey = generateSecretKey();
+  const pubkey = getPublicKey(signingKey);
+  const ownerPubkey = getPublicKey(generateSecretKey());
+  const adapter = "https://identity.example.com/api";
+  const relay = "wss://buzz.example.com";
+  const issuer = "https://issuer.example.com";
+  const connector = "buzz.example.com/test-agent";
+  const grant = "fixture-agent-grant";
+  const now = Math.floor(Date.now() / 1000);
+  const expires = now + 120;
+  const attestation = (audience: string) => new SignJWT({ nostr_pubkey: pubkey, nostr_owner_pubkey: ownerPubkey })
+    .setProtectedHeader({ typ: "nip-fi-agent+jwt", alg: "HS256" }).setIssuer(issuer)
+    .setAudience(audience).setIssuedAt(now).setExpirationTime(expires).sign(new Uint8Array(32));
+  let audience = "https://buzz.example.com";
+  const oidc = await new SignJWT({}).setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt(now).setExpirationTime(expires).sign(new Uint8Array(32));
+  const previous = process.env.VERCEL_OIDC_TOKEN;
+  process.env.VERCEL_OIDC_TOKEN = oidc;
+  t.after(() => {
+    if (previous === undefined) delete process.env.VERCEL_OIDC_TOKEN;
+    else process.env.VERCEL_OIDC_TOKEN = previous;
+  });
+  t.mock.method(globalThis, "fetch", async (input: string, init: RequestInit) => {
+    assert.equal(init.method, "POST");
+    const headers = new Headers(init.headers);
+    if (input === `https://api.vercel.com/v1/connect/token/${encodeURIComponent(connector)}`) {
+      assert.equal(headers.get("authorization"), `Bearer ${oidc}`);
+      assert.deepEqual(JSON.parse(String(init.body)), { subject: { type: "app" } });
+      return Response.json({ token: JSON.stringify({
+        signingKey: Buffer.from(signingKey).toString("hex"),
+        federated: { grant, issuer, ownerPubkey },
+      }) });
+    }
+    assert.equal(input, `${adapter}/v1/nip-fi/agent-assertion`);
+    assert.equal(headers.get("authorization"), `Bearer ${grant}`);
+    assert.equal(init.redirect, "manual");
+    const event: Event = JSON.parse(Buffer.from(headers.get("nostr-authorization")!.slice(6), "base64").toString());
+    assert(verifyEvent(event));
+    assert.equal(event.kind, 27235);
+    assert.equal(event.pubkey, pubkey);
+    assert.deepEqual(event.tags.slice(0, 3), [
+      ["u", input], ["method", "POST"], ["payload", createHash("sha256").update(String(init.body)).digest("hex")],
+    ]);
+    assert.equal(event.tags[3][0], "nonce");
+    assert.match(event.tags[3][1], /^[a-f0-9]{32}$/);
+    assert.deepEqual(JSON.parse(String(init.body)), { nostr_pubkey: pubkey, relay_url: relay });
+    return Response.json({ assertion: await attestation(audience), nostr_pubkey: pubkey, expires_at: expires });
+  });
+  const agents = loadAgents({ BUZZ_GATEWAY_AGENTS: JSON.stringify([{
+    id: "test-agent", relayUrl: relay, pubkey, credentialConnector: connector, federatedIdentityAdapter: adapter,
+    roomAccess: "membership", eveUrl: "https://eve.example.com",
+    eveProject: { teamSlug: "example", teamId: "team_example", projectId: "prj_agent" },
+  }]) });
+  const agent = agents.get("test-agent")!;
+  const signer = await loadSigner(agent);
+  assert.equal(signer.assertion?.expiresAt, expires * 1000);
+  audience = "https://another-community.example.com";
+  await assert.rejects(loadSigner(agent), CredentialRefusedError);
 });
 
 test("Blob and Queues read a newly rotated daemon OIDC token", async t => {

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { hexId, projectIdentity, registrationId, stableId } from "./protocol.ts";
 
 const envName = z.string().regex(/^[A-Z][A-Z0-9_]{2,99}$/);
-const channelId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+export const channelId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const name = z.string().trim().min(1).max(80);
 
 function urlFor(schemes: string[]) {
@@ -19,14 +19,34 @@ export const agentSchema = z.object({
     return url.protocol === "wss:" || ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   }, "Relay connections require WSS outside loopback"),
   pubkey: hexId,
-  signingKeyEnv: envName,
+  signingKeyEnv: envName.optional(),
   ownerAttestationEnv: envName.optional(),
+  credentialConnector: z.string().trim().min(1).max(512).optional(),
+  federatedIdentityAdapter: urlFor(["https:"]).optional(),
   // An existing Buzz profile can be managed by the relay operator instead.
   profile: z.object({ name, description: z.string().max(400).default("") }).optional(),
   eveUrl: urlFor(["https:"]).refine(value => new URL(value).pathname === "/", "Expected the eve deployment origin"),
   eveProject: projectIdentity,
+  roomAccess: z.enum(["configured", "membership"]).default("configured"),
   channels: z.array(channelId).max(100).default([]),
   directMessages: z.array(z.object({ channelId, authors: z.array(hexId).min(1).max(64) })).max(100).default([]),
+}).refine(agent => Boolean(agent.signingKeyEnv) !== Boolean(agent.credentialConnector), {
+  path: ["credentialConnector"],
+  message: "Provide one signing credential source",
+}).refine(agent => !agent.ownerAttestationEnv || Boolean(agent.signingKeyEnv), {
+  path: ["ownerAttestationEnv"],
+  message: "An environment attestation requires an environment signing key",
+}).refine(agent => {
+  if (!agent.federatedIdentityAdapter) return true;
+  const url = new URL(agent.relayUrl);
+  return Boolean(agent.credentialConnector) && url.protocol === "wss:" && url.pathname === "/"
+    && url.port !== "80" && !url.hostname.endsWith(".");
+}, {
+  path: ["federatedIdentityAdapter"],
+  message: "Federated installations require a connector and a root WSS relay URL",
+}).refine(agent => agent.roomAccess === "configured" || (!agent.channels.length && !agent.directMessages.length), {
+  path: ["roomAccess"],
+  message: "Membership mode gets rooms from Buzz",
 });
 
 export type Agent = z.infer<typeof agentSchema> & { namespace: string; relayIdentity: string };

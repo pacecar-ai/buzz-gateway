@@ -3,10 +3,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Event } from "nostr-tools/pure";
 import { z } from "zod";
 import { postToProject } from "./auth.ts";
-import { actionEvent, inboundMessage, loadSigner } from "./buzz.ts";
+import { actionEvent, inboundMessage, roomDirectness } from "./buzz.ts";
 import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
 import type { Agent } from "./config.ts";
+import { CredentialRefusedError, loadSigner, type Signer } from "./credentials.ts";
 import { errorName, log } from "./log.ts";
+import { readRooms, relaySigningKey, sameRooms, type BuzzRooms } from "./memberships.ts";
 import {
   actionId, actionJobSchema, deliveryPath, deliverySchema, deliveryStatusHeader, eveDeliveryPath, eveResultPath, healthPath,
   hexId, inboxTopic, outboxTopic, receiptRetentionDays, receiptSchema, registrationId, typingLifetimeMs,
@@ -20,7 +22,7 @@ const issuerEpoch = () => Math.floor(Date.now() / 1000);
 const reconcileSchema = z.object({ kind: z.literal("reconcile"), registrationId, namespace: hexId, eventId: hexId });
 const incoming = z.discriminatedUnion("kind", [z.object({ kind: z.literal("message"), delivery: deliverySchema }), reconcileSchema]);
 type Lease = { owner: string; expiresAt: number };
-type LiveAgent = { socket: BuzzSocket; lease: Lease };
+type LiveAgent = { socket: BuzzSocket; lease: Lease; membership?: { relayKey: string; rooms: BuzzRooms } };
 type PublishedAction = { event?: Event; published?: boolean; rejected?: boolean };
 type WorkerQueue = Pick<GatewayQueue, "poll" | "sendDelivery" | "sendReconciliation">;
 
@@ -94,15 +96,22 @@ export class GatewayWorker {
     let failures = 0;
     while (!signal.aborted) {
       try {
-        const signer = loadSigner(agent);
         const lease = await this.#claim(agent);
         if (!lease) {
           await pause(4000, signal);
           continue;
         }
-        await this.#relaySession(agent, signer, lease, signal);
+        try {
+          await this.#relaySession(agent, await loadSigner(agent), lease, signal);
+        } finally {
+          await this.#release(agent);
+        }
         failures = 0;
       } catch (error) {
+        if (error instanceof CredentialRefusedError) {
+          log("warn", "relay_installation_refused", { registrationId: agent.id });
+          return;
+        }
         failures += 1;
         log("warn", "relay_reconnecting", { registrationId: agent.id, error: errorName(error), failures });
       }
@@ -123,19 +132,35 @@ export class GatewayWorker {
     if (won) return lease;
   }
 
-  async #relaySession(agent: Agent, signer: ReturnType<typeof loadSigner>, lease: Lease, signal: AbortSignal): Promise<void> {
+  async #release(agent: Agent): Promise<void> {
+    const path = `relay/${agent.relayIdentity}/lease.json`;
+    const current = await this.#state.read<Lease>(path);
+    if (current?.value.owner === this.#owner) await this.#state.replace(path, { owner: this.#owner, expiresAt: 0 }, current.etag);
+  }
+
+  async #relaySession(agent: Agent, signer: Signer, lease: Lease, signal: AbortSignal): Promise<void> {
     const socket = new BuzzSocket(agent, signer);
     const stop = new AbortController();
     const end = () => { stop.abort(); socket.close(); };
     signal.addEventListener("abort", end, { once: true });
     if (signal.aborted) end();
-    const active = { lease, socket };
+    const active: LiveAgent = { lease, socket };
+    const refreshAssertion = signer.assertion
+      ? setTimeout(end, Math.max(0, signer.assertion.expiresAt - Date.now() - 5000))
+      : undefined;
     const renewal = this.#maintainRelay(agent, active, stop.signal).catch(error => {
       log("warn", "relay_lease_lost", { registrationId: agent.id, error: errorName(error) });
       end();
     });
     try {
       await socket.start();
+      if (agent.roomAccess === "membership") {
+        const relayKey = await relaySigningKey(agent.relayUrl);
+        active.membership = { relayKey, rooms: await readRooms(socket, relayKey) };
+      }
+      const channels = active.membership
+        ? [...active.membership.rooms.keys()]
+        : [...agent.channels, ...agent.directMessages.map(room => room.channelId)];
       const checkpointPath = `${agent.namespace}/checkpoint.json`;
       const checkpoint = await this.#state.read<{ since: number }>(checkpointPath);
       const since = Math.max(0, (checkpoint?.value.since ?? issuerEpoch()) - overlapSeconds);
@@ -153,14 +178,14 @@ export class GatewayWorker {
         if (ok) lastSaved = next.since;
       };
       this.#active.set(agent.id, active);
-      socket.subscribe(since, async event => {
+      socket.subscribe(since, channels, async event => {
         if (!this.#isLive(active)) return;
-        await this.#ingest(agent, event);
+        await this.#ingest(agent, event, active.membership?.rooms);
         highWater = Math.max(highWater, Math.min(event.created_at, issuerEpoch()));
         // Stored events can arrive newest first. Commit the catch-up checkpoint after EOSE.
         if (stored && highWater - lastSaved >= 30) await save();
       }, async () => { stored = true; await save(); });
-      log("info", "relay_authenticated", { registrationId: agent.id });
+      log("info", "relay_authenticated", { registrationId: agent.id, rooms: channels.length });
       if (agent.profile) {
         // The optional configuration makes the gateway the publisher for this agent's profile.
         const profile = JSON.stringify({ name: agent.profile.name, display_name: agent.profile.name, about: agent.profile.description });
@@ -170,12 +195,10 @@ export class GatewayWorker {
       await this.#presence(agent, socket, "online");
       await socket.closed;
     } finally {
+      clearTimeout(refreshAssertion);
       this.#active.delete(agent.id);
       end();
       await Promise.all([renewal, socket.drained()]);
-      const path = `relay/${agent.relayIdentity}/lease.json`;
-      const current = await this.#state.read<Lease>(path);
-      if (current?.value.owner === this.#owner) await this.#state.replace(path, { owner: this.#owner, expiresAt: 0 }, current.etag);
       log("info", "relay_disconnected", { registrationId: agent.id });
     }
   }
@@ -188,6 +211,16 @@ export class GatewayWorker {
       const lease = await this.#claim(agent, true);
       if (!lease) throw new Error("Relay lease expired");
       active.lease = lease;
+      if (active.membership) {
+        const { relayKey, rooms } = active.membership;
+        const next = await readRooms(active.socket, relayKey);
+        if (!sameRooms(rooms, next)) {
+          log("info", "buzz_membership_changed", { registrationId: agent.id, rooms: next.size });
+          // Reconnect with the updated filter and the normal replay checkpoint.
+          active.socket.close();
+          return;
+        }
+      }
       ticks += 1;
       if (ticks % 4 === 0 && this.#active.get(agent.id) === active) await this.#presence(agent, active.socket, "online");
     }
@@ -203,9 +236,9 @@ export class GatewayWorker {
 
   #isLive(active: LiveAgent): boolean { return active.socket.connected && active.lease.expiresAt > Date.now(); }
 
-  async #ingest(agent: Agent, event: Event): Promise<void> {
+  async #ingest(agent: Agent, event: Event, rooms?: BuzzRooms): Promise<void> {
     if ([...this.#agents.values()].some(candidate => candidate.pubkey === event.pubkey)) return;
-    const route = inboundMessage(agent, event);
+    const route = inboundMessage(agent, event, rooms);
     if (!route) return;
     const { delivery, target, addressed } = route;
     const threadPath = `${agent.namespace}/thread/${delivery.conversationId}.json`;
@@ -232,7 +265,7 @@ export class GatewayWorker {
     if (!agent || agent.namespace !== reference.namespace) { log("warn", "inbox_registration_retired"); return; }
     const path = deliveryPath(reference);
     const record = await this.#state.read<DeliveryRecord>(path);
-    if (!record || record.value.completed || !deliveryAllowed(agent, record.value)) return;
+    if (!record || record.value.completed || !this.#deliveryAllowed(agent, record.value)) return;
     const location = { community: new URL(agent.relayUrl).origin, roomId: record.value.target.channelId };
     const settleDenied = async (response: Response): Promise<boolean> => {
       if (response.status !== 403 || response.headers.get(deliveryStatusHeader) !== "denied") return false;
@@ -280,7 +313,7 @@ export class GatewayWorker {
     const id = actionId(action);
     const path = `${agent.namespace}/outbox/${id}.json`;
     const record = await this.#state.read<DeliveryRecord>(deliveryPath(action));
-    if (!record || !deliveryAllowed(agent, record.value)) return;
+    if (!record || !this.#deliveryAllowed(agent, record.value)) return;
     const { target } = record.value;
     let saved = action.kind === "typing" ? null : await this.#state.read<PublishedAction>(path);
     if (saved?.value.published || saved?.value.rejected) return;
@@ -309,12 +342,15 @@ export class GatewayWorker {
       registrationId: agent.id, eventId: action.eventId, actionId: id, kind: action.kind,
     });
   }
-}
 
-function deliveryAllowed(agent: Agent, record: DeliveryRecord): boolean {
-  const { delivery, target } = record;
-  if (delivery.direct) return agent.directMessages.some(room => room.channelId === target.channelId && room.authors.includes(target.author));
-  return agent.channels.includes(target.channelId);
+  #deliveryAllowed(agent: Agent, record: DeliveryRecord): boolean {
+    const active = this.#active.get(agent.id);
+    if (agent.roomAccess === "membership" && (!active || !this.#isLive(active) || !active.membership)) {
+      throw new Error("Waiting for a Buzz membership snapshot");
+    }
+    const { delivery, target } = record;
+    return roomDirectness(agent, target.channelId, target.author, active?.membership?.rooms) === delivery.direct;
+  }
 }
 
 async function updateDelivery(state: State, path: string, update: (record: DeliveryRecord) => DeliveryRecord): Promise<void> {

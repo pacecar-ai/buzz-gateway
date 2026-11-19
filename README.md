@@ -1,6 +1,6 @@
 # Buzz Gateway
 
-Run an [eve](https://eve.dev/) agent as a native member of a [Buzz](https://github.com/block/buzz) workspace. The gateway carries text mentions, follow-ups in a joined thread, and messages in allowlisted Buzz DM rooms. It sends signed replies, typing indicators, and optional acknowledgment reactions.
+Run an [eve](https://eve.dev/) agent as a native member of a [Buzz](https://github.com/block/buzz) community. Authorize the agent in Buzz, then invite it to private channels. The gateway carries mentions, follow-ups in joined threads, and messages in the agent's Buzz DMs. It sends signed replies, typing indicators, and optional acknowledgment reactions.
 
 Inspired by [eve's Discord Gateway relay](https://eve.dev/docs/channels/discord/reference#run-the-relay-as-a-vercel-daemon), originally implemented by [Ben Pankow](https://github.com/vercel/eve/pull/4934).
 
@@ -24,6 +24,7 @@ flowchart LR
         API -->|"Routing and health"| Blob
     end
     Buzz <-->|"WebSocket · NIP-42 and signed events"| Daemon
+    Daemon -.->|"Get installed agent credential"| Connect
     Daemon -->|"HTTPS · Vercel OIDC"| Eve
     Eve -->|"POST /api/actions · Vercel OIDC"| API
     Eve -.->|"Request callback key"| Connect
@@ -54,7 +55,7 @@ The workflow sends the checked commit to the [Vercel Deployments API](https://ve
 
 ### Install the channel
 
-From this repository, run `npm ci && npm pack`. Install the resulting `buzz-gateway-*.tgz` in the eve project with `npm install /path/to/buzz-gateway-0.1.0.tgz`. Commit the tarball inside the agent's repository if it needs to install from a remote build.
+From this repository, run `npm ci && npm pack`. Install the resulting `buzz-gateway-*.tgz` in the eve project with `npm install /path/to/buzz-gateway-0.2.0.tgz`. Commit the tarball inside the agent's repository if it needs to install from a remote build.
 
 Add `agent/channels/buzz.ts` to the eve project.
 
@@ -72,7 +73,7 @@ Set `BUZZ_GATEWAY_ORIGIN` to the gateway's HTTPS production origin and `BUZZ_GAT
 
 Use your projects' Vercel production origins. If the eve deployment is protected, add the gateway as a [Trusted Source](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/trusted-sources) on the eve project with a Production-to-Production rule. If the gateway deployment is protected, give the eve project the corresponding rule on the gateway. The gateway and channel send the OIDC token in the Trusted Sources header as well as the application authorization header.
 
-To enforce the agent project's own access policy, pass `authorizeDelivery` to `createBuzzChannel`. The gateway supplies the community as the origin of the configured Buzz relay, the room ID from the signed event, the sender's verified public key, and whether the room is a DM. The channel applies the policy before starting a turn and again when reconciling a reply. Approve exact community origins and private rooms and require an explicit sender list for DMs.
+For an agent that needs additional application-level authorization, pass `authorizeDelivery` to `createBuzzChannel`. The gateway supplies the community origin, room ID, verified sender public key, and whether the room is a DM. The channel applies the policy before starting a turn and when reconciling a reply.
 
 ### Use Vercel Connect for callbacks
 
@@ -96,9 +97,27 @@ export default createBuzzChannel({
 
 The gateway requires the configured callback key alongside the agent project's OIDC identity. The daemon continues to sign Buzz events with each registration's own key.
 
-### Register the Buzz identity
+### Authorize in Buzz
 
-Provision a dedicated Buzz agent identity on your relay and grant it access to the rooms it should answer in. Set the signing key (64-character lowercase hex or `nsec`) as a Production Secret named in `signingKeyEnv`. Where the relay grants the identity access via an owner attestation, set `ownerAttestationEnv` to the name of a second secret containing the signed JSON `["auth", ownerPubkey, conditions, signature]` tag. For information on relay access and events, see [Buzz's Nostr protocol reference](https://github.com/block/buzz/blob/main/NOSTR.md).
+Use a dedicated agent identity for each community installation. For communities that require federated sign-in, use the community's identity adapter to enroll the identity. The local enrollment command creates keys for the named agents, opens a browser sign-in flow and accepts owner proofs from **Buzz → Settings → Security → Authorize external identity**. It writes one permission-restricted Connect input file per agent. [Buzz external identity authorization](https://github.com/block/buzz-app/blob/main/docs/identity.md#authorize-an-external-agent-identity) · [Buzz agent grants](https://github.com/block/buzz/blob/main/docs/nips/NIP-FA.md#agent-grant)
+
+```sh
+node scripts/enroll.ts https://identity.example.com/adapter example-agent
+```
+
+After signing in and authorizing the generated public key, create a [Vercel Connect API Key connector](https://vercel.com/connect/api-key) with your relay's hostname in the identifier. Use the `values[0].value` field of the enrollment file as the API key in the dashboard, or pass the file to the Connect API with the gateway project ID.
+
+```sh
+jq --arg projectId prj_example '. + {
+  type: "api-key", name: "example-agent", uid: "buzz.example.com/example-agent",
+  projectId: $projectId, environments: ["production"]
+}' /path/to/example-agent.json |
+  vercel api /v1/connect/connectors -X POST --input -
+```
+
+Attach each identity credential only to the gateway's Production environment. Remove the temporary credential files after the connector is linked. The daemon exchanges each grant for a short-lived assertion for its registered relay and renews the assertion on reconnect. If a grant expires or is revoked, enroll again through the identity adapter. The credential value contains a signing key and the adapter's agent grant in the fields `signingKey` and `federated: { grant, issuer, ownerPubkey }`.
+
+For a relay that supports direct agent membership, provision the identity on that relay. The connector value can contain just `{"signingKey":"<hex or nsec>"}`. For NIP-AA virtual membership, include the signed JSON `ownerAttestation` array as well. Self-hosted relays can also supply those credentials through `signingKeyEnv` and optional `ownerAttestationEnv`. [Buzz relay reference](https://github.com/block/buzz/blob/main/NOSTR.md)
 
 Set `BUZZ_GATEWAY_AGENTS` as a JSON array in the gateway's Production environment. Replace the example identifiers and URLs with values from your relay and deployment.
 
@@ -108,7 +127,8 @@ Set `BUZZ_GATEWAY_AGENTS` as a JSON array in the gateway's Production environmen
     "id": "example-agent",
     "relayUrl": "wss://buzz.example.com",
     "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "signingKeyEnv": "BUZZ_EXAMPLE_SIGNING_KEY",
+    "credentialConnector": "buzz.example.com/example-agent",
+    "federatedIdentityAdapter": "https://identity.example.com/adapter",
     "eveUrl": "https://agent.example.com",
     "eveProject": {
       "teamSlug": "example-team",
@@ -117,18 +137,18 @@ Set `BUZZ_GATEWAY_AGENTS` as a JSON array in the gateway's Production environmen
       "environment": "production",
       "issuerMode": "team"
     },
-    "channels": ["your-buzz-room-id"],
-    "directMessages": []
+    "roomAccess": "membership"
   }
 ]
 ```
 
-- `channels` contains Buzz room IDs. A user must mention the agent to start a conversation in a room. Follow-up messages in a joined thread reach the same eve session.
-- `directMessages` accepts entries shaped as `{"channelId":"your-buzz-dm-room-id","authors":["<64-character user pubkey>"]}`. Messages from those authors reach one session per room. The gateway uses Buzz room-scoped text events.
+- Set `federatedIdentityAdapter` to the community's adapter base URL when the relay requires federated sign-in. Omit that property for direct or NIP-AA membership.
+- With `roomAccess: "membership"`, the gateway verifies the relay's signed private-room metadata and member lists. Invite or remove the agent in Buzz. The agent responds to mentions and follow-ups in joined threads and uses one session per Buzz DM room.
+- Existing registrations with `channels` and `directMessages` still use their configured room access. To switch an existing registration, set `roomAccess` to `membership` and remove those fields.
 - `profile` optionally sets the agent's Buzz `name` and `description`. Omit it if the profile is already managed on the relay.
 - `issuerMode` follows the target Vercel team's OIDC issuer setting. Use `global` for the global issuer.
 
-Redeploy the gateway after editing registrations. Check that health reports `relay: "connected"`, then mention the agent in an allowlisted Buzz room. A degraded relay status means some registrations still need attention. Keep agents intended for private DM access in explicitly configured DM rooms.
+Redeploy the gateway after editing registrations. Check that health reports `relay: "connected"`, then invite and mention the agent in a private Buzz channel. Room membership changes take effect as the daemon refreshes the signed records. A degraded relay status means some registrations still need attention. To uninstall, remove the identity from Buzz, revoke its grant with the adapter, and remove its registration and Connect link.
 
 ## Logs and local checks
 
@@ -141,6 +161,6 @@ npm run build:adapter
 docker build -f daemon/Dockerfile -t buzz-gateway .
 ```
 
-The test uses a loopback WebSocket relay with synthetic signing keys and an eve HTTP fixture. It checks NIP-42 authentication, route authorization, duplicate handling, signing, and log redaction without cloud credentials.
+The tests use a loopback WebSocket relay and an eve HTTP fixture. They check signed room membership, credential exchange, route authorization, duplicate handling, signing, and log redaction without cloud credentials.
 
 [MIT License](LICENSE)

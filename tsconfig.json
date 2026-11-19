@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["api/**/*.ts", "daemon/**/*.ts", "integrations/**/*.ts", "lib/**/*.ts", "test/**/*.ts", "vercel.ts"]
+  "include": ["api/**/*.ts", "daemon/**/*.ts", "integrations/**/*.ts", "lib/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "vercel.ts"]
 }
