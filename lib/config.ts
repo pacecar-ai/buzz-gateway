@@ -23,6 +23,10 @@ export const agentSchema = z.object({
   ownerAttestationEnv: envName.optional(),
   credentialConnector: z.string().trim().min(1).max(512).optional(),
   federatedIdentityAdapter: urlFor(["https:"]).optional(),
+  desktop: z.object({
+    ownerPubkey: hexId,
+    projectSlug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,99}$/),
+  }).optional(),
   // An existing Buzz profile can be managed by the relay operator instead.
   profile: z.object({
     name,
@@ -45,6 +49,10 @@ export const agentSchema = z.object({
 }).refine(agent => !agent.ownerAttestationEnv || Boolean(agent.signingKeyEnv), {
   path: ["ownerAttestationEnv"],
   message: "An environment attestation requires an environment signing key",
+}).refine(agent => !agent.desktop || (agent.desktop.ownerPubkey !== agent.pubkey && agent.profileFromConnector
+  && /^scl_[A-Za-z0-9]+$/.test(agent.credentialConnector ?? "") && Boolean(agent.federatedIdentityAdapter)), {
+  path: ["desktop"],
+  message: "Desktop enrollment requires a separate owner, a federated adapter and a connector ID supplying the profile",
 }).refine(agent => {
   if (!agent.federatedIdentityAdapter) return true;
   const url = new URL(agent.relayUrl);

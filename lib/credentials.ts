@@ -5,6 +5,8 @@ import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey, type Event, type EventTemplate } from "nostr-tools/pure";
 import { z } from "zod";
 import type { Agent } from "./config.ts";
+import { readDesktopGrant, WaitingForOwner } from "./desktop-grants.ts";
+import type { State } from "./state.ts";
 import { hexId } from "./protocol.ts";
 
 const ownerAttestation = z.tuple([z.literal("auth"), hexId, z.string().max(2048), z.string().regex(/^[a-f0-9]{128}$/)]);
@@ -15,6 +17,7 @@ const federatedGrant = z.object({
 });
 const credentials = z.object({
   signingKey: z.string().trim().min(1).max(128),
+  actionKey: z.string().optional(),
   ownerAttestation: ownerAttestation.optional(),
   federated: federatedGrant.optional(),
 });
@@ -37,7 +40,7 @@ export class CredentialRefusedError extends Error {
   }
 }
 
-export async function loadSigner(agent: Agent): Promise<Signer> {
+export async function loadSigner(agent: Agent, state?: State): Promise<Signer> {
   const credential = agent.credentialConnector
     ? await fromConnect(agent.credentialConnector)
     : credentials.parse({
@@ -49,15 +52,17 @@ export async function loadSigner(agent: Agent): Promise<Signer> {
   const secret = signingKey(credential.signingKey, agent.pubkey);
   const sign = (template: EventTemplate) => finalizeEvent(template, secret);
   if (agent.federatedIdentityAdapter) {
-    if (!credential.federated) throw new CredentialRefusedError();
-    const assertion = await requestAssertion(agent, agent.federatedIdentityAdapter, credential.federated, sign);
+    const grant = credential.federated ?? (agent.desktop && state ? await readDesktopGrant(agent, secret, state) : undefined);
+    if (!grant && agent.desktop) throw new WaitingForOwner();
+    if (!grant || (agent.desktop && grant.ownerPubkey !== agent.desktop.ownerPubkey)) throw new CredentialRefusedError();
+    const assertion = await requestAssertion(agent, agent.federatedIdentityAdapter, grant, sign);
     return { sign, assertion };
   }
   if (credential.federated) throw new CredentialRefusedError();
   return { sign, ownerTag: credential.ownerAttestation };
 }
 
-async function fromConnect(connector: string): Promise<z.infer<typeof credentials>> {
+export async function fromConnect(connector: string): Promise<z.infer<typeof credentials>> {
   const response = await fetch(`https://api.vercel.com/v1/connect/token/${encodeURIComponent(connector)}`, {
     method: "POST",
     headers: {
@@ -74,7 +79,7 @@ async function fromConnect(connector: string): Promise<z.infer<typeof credential
   return credentials.parse(JSON.parse(token));
 }
 
-function signingKey(raw: string, pubkey: string): Uint8Array {
+export function signingKey(raw: string, pubkey: string): Uint8Array {
   let secret: Uint8Array;
   if (hexId.safeParse(raw).success) secret = Buffer.from(raw, "hex");
   else {
@@ -86,7 +91,7 @@ function signingKey(raw: string, pubkey: string): Uint8Array {
   return secret;
 }
 
-async function requestAssertion(
+export async function requestAssertion(
   agent: Agent,
   adapter: string,
   credential: z.infer<typeof federatedGrant>,

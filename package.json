@@ -1,6 +1,6 @@
 {
   "name": "buzz-gateway",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -24,9 +24,13 @@
     "prepack": "npm run build:adapter",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
-    "worker": "node daemon/main.ts"
+    "worker": "node daemon/main.ts",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "buzz:invite": "node scripts/desktop-invite.mjs",
+    "buzz:prepare": "node scripts/prepare-desktop.ts"
   },
   "dependencies": {
+    "@noble/curves": "2.0.1",
     "@vercel/blob": "2.9.0",
     "@vercel/oidc": "4.0.9",
     "@vercel/queue": "0.11.0",
@@ -39,6 +43,7 @@
     "@types/node": "24.19.2",
     "@types/ws": "8.18.2",
     "@vercel/config": "0.15.0",
+    "esbuild": "0.28.2",
     "eve": "1.0.0-rc.9",
     "typescript": "5.9.3"
   },

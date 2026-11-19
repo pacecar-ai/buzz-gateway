@@ -8,6 +8,7 @@ import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
 import type { Agent } from "./config.ts";
 import { readConnectProfile } from "./connect-profile.ts";
 import { CredentialRefusedError, loadSigner, type Signer } from "./credentials.ts";
+import { desktopGrantPath, WaitingForOwner } from "./desktop-grants.ts";
 import { errorName, log } from "./log.ts";
 import { readRooms, relaySigningKey, sameRooms, type BuzzRooms } from "./memberships.ts";
 import {
@@ -38,6 +39,7 @@ export class GatewayWorker {
   readonly #queue: WorkerQueue;
   readonly #post: typeof postToProject;
   readonly #active = new Map<string, LiveAgent>();
+  readonly #waiting = new Set<string>();
   readonly #owner = randomUUID();
 
   constructor(
@@ -67,7 +69,8 @@ export class GatewayWorker {
     let reported = false;
     while (!signal.aborted) {
       try {
-        const heartbeat = { at: Date.now(), configured: this.#agents.size, connected: this.#active.size };
+        const heartbeat = { at: Date.now(), configured: this.#agents.size, connected: this.#active.size,
+          waiting: this.#waiting.size, online: [...this.#active.keys()] };
         await this.#state.write(healthPath, heartbeat, 1);
         if (!reported) log("info", "gateway_storage_ready", { registrations: this.#agents.size });
         reported = true;
@@ -102,18 +105,32 @@ export class GatewayWorker {
     let failures = 0;
     while (!signal.aborted) {
       try {
+        // A pending installation needs no relay lease. Pick up its grant without a redeploy.
+        if (this.#waiting.has(agent.id)) {
+          const installed = await this.#state.read<{ sealed?: unknown }>(desktopGrantPath(agent));
+          if (!installed?.value.sealed) {
+            await pause(8000, signal);
+            continue;
+          }
+          this.#waiting.delete(agent.id);
+        }
         const lease = await this.#claim(agent);
         if (!lease) {
           await pause(4000, signal);
           continue;
         }
         try {
-          await this.#relaySession(agent, await loadSigner(agent), lease, signal);
+          await this.#relaySession(agent, await loadSigner(agent, this.#state), lease, signal);
         } finally {
           await this.#release(agent);
         }
         failures = 0;
       } catch (error) {
+        if (error instanceof WaitingForOwner) {
+          this.#waiting.add(agent.id);
+          log("info", "buzz_approval_pending", { registrationId: agent.id });
+          continue;
+        }
         if (error instanceof CredentialRefusedError) {
           log("warn", "relay_installation_refused", { registrationId: agent.id });
           return;

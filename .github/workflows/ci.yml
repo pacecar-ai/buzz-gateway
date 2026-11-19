@@ -24,6 +24,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build:adapter
+      - run: npm run build:plugin -- https://gateway.example.org
 
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.VERCEL_PROJECT_ID != ''

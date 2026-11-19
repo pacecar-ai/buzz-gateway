@@ -2,6 +2,10 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { z } from "zod";
 import { readConnectProfile } from "../lib/connect-profile.ts";
+import { loadAgents, type Agent } from "../lib/config.ts";
+import { fromConnect, signingKey as verifySigningKey } from "../lib/credentials.ts";
+import { createHandoff, verifyOwner } from "../lib/desktop.ts";
+import { issueDesktopGrant, readDesktopGrant } from "../lib/desktop-grants.ts";
 import { enrollAgent, EnrollmentRefused, exchangeLogin, loginUrl, ownerProof } from "../lib/enrollment.ts";
 import { enrollmentPage } from "../lib/enrollment-page.ts";
 import { errorName, log } from "../lib/log.ts";
@@ -29,7 +33,7 @@ const planSchema = z.object({
   && plan.agents.every(agent => agent.inviteDigest !== plan.operatorDigest));
 const inputSchema = z.object({
   id: registrationId,
-  step: z.enum(["view", "start", "complete", "collect", "clear"]),
+  step: z.enum(["view", "start", "complete", "collect", "clear", "prepare", "handoff"]),
   redirect: z.string().max(4096).optional(),
   proof: ownerProof.optional(),
 });
@@ -67,7 +71,8 @@ export async function handleEnrollment(request: Request, configuration: string |
     const { id, step, redirect, proof } = input.data;
     const agent = plan.data.agents.find(candidate => candidate.id === id);
     const actual = createHash("sha256").update(token).digest();
-    const operator = step === "collect" || step === "clear";
+    const operator = step === "collect" || step === "clear" || step === "prepare"
+      || (step === "handoff" && timingSafeEqual(actual, Buffer.from(plan.data.operatorDigest, "hex")));
     const expected = operator ? plan.data.operatorDigest : agent?.inviteDigest;
     if (!agent || !expected || !timingSafeEqual(actual, Buffer.from(expected, "hex"))
       || (!operator && request.headers.get("origin") !== plan.data.origin)) {
@@ -75,6 +80,27 @@ export async function handleEnrollment(request: Request, configuration: string |
     }
 
     const path = `enrollment/${agent.inviteDigest}.json`;
+    const registered = loadAgents();
+    const matches = (item: z.infer<typeof entry>): Agent | undefined => {
+      const match = registered.get(item.id);
+      return "connectorId" in item && match?.credentialConnector === item.connectorId
+        && match.desktop?.ownerPubkey === plan.data.ownerPubkey
+        && match.federatedIdentityAdapter?.replace(/\/$/, "") === plan.data.adapter.replace(/\/$/, "") ? match : undefined;
+    };
+    const desktop = matches(agent);
+    if (step === "handoff") {
+      if (!desktop) return reply({ error: "This connector has no Buzz Desktop setup." }, 409);
+      const proposed = operator ? plan.data.agents.map(matches).filter((item): item is Agent =>
+        !!item && item.relayUrl === desktop.relayUrl) : [desktop];
+      const expiresAt = operator ? Date.now() + 24 * 60 * 60_000 : Math.min(plan.data.expiresAt, Date.now() + 15 * 60_000);
+      const ref = await createHandoff(proposed, state, expiresAt);
+      return reply({ url: plan.data.origin + "/connect/#" + ref, expiresAt });
+    }
+    if (step === "prepare") {
+      const { value } = await getDraft(state, path, desktop);
+      if (value.collected || value.grant || !value.signingKey) return reply({ error: "This agent has already been approved." }, 409);
+      return reply({ pubkey: value.pubkey, connectorId: "connectorId" in agent ? agent.connectorId : undefined, owner: plan.data.ownerPubkey, adapter: plan.data.adapter, credential: { signingKey: value.signingKey, actionKey: value.actionKey } });
+    }
     if (operator) {
       const current = await state.read<Draft>(path);
       if (step === "collect") {
@@ -89,10 +115,18 @@ export async function handleEnrollment(request: Request, configuration: string |
         ? reply({ status: "collected" }) : reply({ error: "Try again." }, 409);
     }
 
-    const draft = await getDraft(state, path);
+    const draft = await getDraft(state, path, desktop);
     const { pubkey, signingKey, grant, collected, lockedUntil, attempt } = draft.value;
-    if (step === "view" || grant || collected) {
-      return reply({ ...await profileOf(agent), pubkey, authorized: Boolean(grant || collected) });
+    let approved = Boolean(grant || collected);
+    if (desktop && !approved) {
+      const credential = await fromConnect(desktop.credentialConnector!);
+      const key = verifySigningKey(credential.signingKey, pubkey);
+      const issued = credential.federated ?? await readDesktopGrant(desktop, key, state);
+      if (issued && issued.ownerPubkey !== desktop.desktop!.ownerPubkey) throw new Error("Grant owner mismatch");
+      approved = Boolean(issued);
+    }
+    if (step === "view" || approved) {
+      return reply({ ...await profileOf(agent), pubkey, authorized: approved, ...(desktop && { desktop: true }) });
     }
     if (lockedUntil && lockedUntil > Date.now()) return reply({ error: "An authorization is already in progress." }, 409);
     if (step === "start") {
@@ -114,7 +148,7 @@ export async function handleEnrollment(request: Request, configuration: string |
     if (!code) {
       return reply({ error: "Paste the full return address from this sign-in attempt." }, 400);
     }
-    if (!proof || proof[1] !== plan.data.ownerPubkey || !signingKey) {
+    if (!proof || proof[1] !== plan.data.ownerPubkey || !signingKey || (desktop && !verifyOwner(pubkey, proof[1], proof))) {
       return reply({ error: "Go back and paste the ownership proof from the Buzz identity this invite was issued to." }, 400);
     }
     const profile = await profileOf(agent);
@@ -123,9 +157,14 @@ export async function handleEnrollment(request: Request, configuration: string |
     const locked = await state.read<Draft>(path);
     if (locked?.value.lockedUntil !== held.lockedUntil) return reply({ error: "Try again." }, 409);
     try {
-      const session = await exchangeLogin(plan.data.adapter, code, attempt.verifier);
-      const issued = await enrollAgent(plan.data.adapter, session, signingKey, proof);
-      const completed = { ...draft.value, grant: issued, attempt: undefined, lockedUntil: undefined };
+      const issue = async () => enrollAgent(plan.data.adapter, await exchangeLogin(plan.data.adapter, code, attempt.verifier), signingKey, proof);
+      let completed: Draft;
+      if (desktop) {
+        await issueDesktopGrant(desktop, verifySigningKey(signingKey, pubkey), state, issue);
+        completed = { pubkey, collected: true };
+      } else {
+        completed = { ...draft.value, grant: await issue(), attempt: undefined, lockedUntil: undefined };
+      }
       if (!await state.replace(path, completed, locked.etag, 1)) throw new Error("Enrollment record changed");
       log("info", "buzz_enrollment_authorized", { registrationId: id });
       return reply({ ...profile, pubkey, authorized: true });
@@ -148,16 +187,17 @@ async function profileOf(agent: z.infer<typeof entry>) {
   return { name: agent.name, picture: agent.picture };
 }
 
-async function getDraft(state: State, path: string): Promise<Versioned<Draft>> {
+async function getDraft(state: State, path: string, desktop?: Agent): Promise<Versioned<Draft>> {
   let draft = await state.read<Draft>(path);
   if (!draft) {
-    const secret = generateSecretKey();
-    await state.create<Draft>(path, {
-      pubkey: getPublicKey(secret), signingKey: Buffer.from(secret).toString("hex"), actionKey: randomBytes(32).toString("hex"),
+    const credential = desktop ? await fromConnect(desktop.credentialConnector!) : undefined;
+    const secret = desktop && credential ? verifySigningKey(credential.signingKey, desktop.pubkey) : generateSecretKey();
+    await state.create<Draft>(path, desktop && credential?.federated ? { pubkey: desktop.pubkey, collected: true } : {
+      pubkey: getPublicKey(secret), signingKey: Buffer.from(secret).toString("hex"), actionKey: credential?.actionKey ?? randomBytes(32).toString("hex"),
     }, 1);
     draft = await state.read<Draft>(path);
   }
-  if (!draft) throw new Error("Enrollment record unavailable");
+  if (!draft || (desktop && draft.value.pubkey !== desktop.pubkey)) throw new Error("Enrollment record unavailable");
   return draft;
 }
 

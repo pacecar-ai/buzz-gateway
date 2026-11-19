@@ -4,6 +4,16 @@ Run an [eve](https://eve.dev/) agent as a native member of a [Buzz](https://gith
 
 Inspired by [eve's Discord Gateway relay](https://eve.dev/docs/channels/discord/reference#run-the-relay-as-a-vercel-daemon), originally implemented by [Ben Pankow](https://github.com/vercel/eve/pull/4934).
 
+## Connect from Buzz Desktop
+
+Open your team’s Vercel setup link on the computer where you use Buzz. Choose **Install plugin in Buzz** the first time and approve the installation. Return to the link and choose **Open agents in Buzz**. The Vercel page in Buzz shows each invited connector with its name and portrait.
+
+Choose **Connect** for one agent or **Connect all** for the displayed group. Buzz signs a separate ownership approval for each selected identity. If any of them need a federated grant, one browser sign-in covers up to eight selected agents. **Add to Buzz** lists an already authorized agent without another sign-in. Completed agents appear in Buzz’s **Agents** list. Invite an agent to the private room where you want it to respond.
+
+Reopen **Settings → Plugins → Vercel** to see agents in the selected community. **Manage in Vercel** opens the individual connector. After a name or portrait change, open the team invitation, refresh the connectors and choose **Update profile in Buzz** if the hosted listing has an older profile.
+
+The desktop plugin uses Buzz’s hosted-agent provider, owner-signed roster and normal plugin install review. The install link pins the package’s exact SHA-256 digest. Automatic sign-in return uses a fixed Node.js process with a temporary OS-assigned loopback port on the computer running Buzz. If Node is unavailable, Buzz can still create the ownership proof and accept the browser return address in the plugin. [Buzz plugin installation](https://github.com/block/buzz-app/blob/main/docs/deep-links.md) · [Buzz hosted agents](https://github.com/block/buzz-app/blob/v1.0.2/src/features/agents/service.ts#L4110-L4195)
+
 ## Architecture
 
 ```mermaid
@@ -55,7 +65,7 @@ The workflow sends the checked commit to the [Vercel Deployments API](https://ve
 
 ### Install the channel
 
-From this repository, run `npm ci && npm pack`. Install the resulting `buzz-gateway-*.tgz` in the eve project with `npm install /path/to/buzz-gateway-0.2.0.tgz`. Commit the tarball inside the agent's repository if it needs to install from a remote build.
+From this repository, run `npm ci && npm pack`. Install the resulting `buzz-gateway-*.tgz` in the eve project with `npm install /path/to/buzz-gateway-<version>.tgz`. Commit the tarball inside the agent's repository if it needs to install from a remote build.
 
 Add `agent/channels/buzz.ts` to the eve project.
 
@@ -103,6 +113,41 @@ export default createBuzzChannel({
 ```
 
 The gateway verifies the agent project's OIDC identity and its callback key. `BUZZ_GATEWAY_ACTION_KEY_SHA256` supplies a gateway-wide default for registrations that have no `actionKeyDigest`.
+
+### Prepare a desktop invitation
+
+The operator creates a connector and configures its identity once. `npm run buzz:prepare -- ./registration.json` creates the private Vercel connector, links the gateway and agent projects for Production, and prints a registration containing public identifiers and an action-key digest. It requires a logged-in `vercel` CLI. Give each agent its own `id` and `uid`. The input has this shape.
+
+```json
+{
+  "id": "finance", "name": "Finance", "uid": "buzz.example.org/finance",
+  "gatewayProjectId": "prj_gateway",
+  "relayUrl": "wss://buzz.example.org", "federatedIdentityAdapter": "https://identity.example.org/adapter",
+  "eveUrl": "https://finance.example.org",
+  "eveProject": { "teamSlug": "example-team", "teamId": "team_example", "projectId": "prj_finance" },
+  "desktop": { "projectSlug": "finance", "ownerPubkey": "<64-hex Buzz owner public key>" }
+}
+```
+
+An optional `icon` can carry the Vercel portrait hash. For an existing, unapproved connector from a hosted web enrollment plan, add its `connectorId`, set `BUZZ_DESKTOP_OPERATOR` in the invoking process and pass the gateway HTTPS origin after the filename. This preserves the signing key prepared for that invitation. An already enrolled agent can use its current registration and connector. Add `desktop` with its existing owner and project slug.
+
+Add the prepared entries to the gateway’s `BUZZ_GATEWAY_AGENTS`, preserving existing registrations. Set `BUZZ_GATEWAY_CONNECTOR` on each eve project to its connector ID. Configure the gateway’s Production variables and deploy.
+
+| Gateway variable | Value |
+| --- | --- |
+| `BUZZ_GATEWAY_PUBLIC_ORIGIN` | Canonical HTTPS gateway origin used by the desktop plugin. A hosted enrollment origin or Vercel’s production URL also supplies the default. |
+| `BUZZ_GATEWAY_DESKTOP_OPERATOR_SHA256` | SHA-256 hex digest of a random 32-byte base64url operator key. Keep the key in your secret manager. |
+| `BUZZ_GATEWAY_DESKTOP_IDENTITY` | Optional JSON with the Buzz build’s federated `authority` ID and HTTPS `adapter`. It grants the plugin the exact owner-revocation route when the identity provider supports it. |
+
+To issue an invitation, supply the operator key on stdin or in the invoking process’s `BUZZ_DESKTOP_OPERATOR` environment. Add `--all` to include connectors for the same Buzz owner and community.
+
+```sh
+npm run buzz:invite -- https://gateway.example.org finance --all
+```
+
+The HTTPS link lasts seven days. Opening it shows the plugin installer. Its private reference reveals connector metadata and authorizes each selected key only with a matching owner signature. A pending agent obtains its own federated grant after account sign-in. The gateway encrypts that grant in private Blob using a key derived from the signing key held in the individual Vercel connector. Existing connectors can continue to hold their grants directly. Agents pick up newly issued grants without another deployment. The gateway logs an agent’s approval and relay connection without recording sign-in codes, ownership proofs or grants.
+
+A package can be built locally with `npm run build:plugin -- https://gateway.example.org /tmp/buzz-release /tmp/buzz-plugin`. Buzz’s `buzzodz plugin pack` accepts the generated folder. In environments that require a signed publisher, sign that folder with `buzzodz plugin sign` and distribute the signed folder through the organization’s reviewed Git source. The ordinary Vercel install link uses Buzz’s hash-pinned URL format.
 
 ### Authorize in Buzz
 

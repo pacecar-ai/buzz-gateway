@@ -234,6 +234,12 @@ export function enrollmentPage(): Response {
     </p>
   </header>
   <p class="notice" id="notice" role="status">Opening the setup link…</p>
+  <section id="desktop" hidden>
+    <p class="instructions">Review this agent in Buzz Desktop. Buzz adds it to your Agents list after approval.</p>
+    <div class="actions"><button id="use-desktop" type="button" class="button primary">Continue in Buzz Desktop</button>
+    <button id="use-browser" type="button" class="text-button">Use browser setup</button></div>
+    <p id="desktop-error" role="alert" class="feedback"></p>
+  </section>
   <noscript><p class="notice">Enable JavaScript and reopen your setup link.</p></noscript>
   <div id="setup" hidden>
     <ol class="steps" aria-label="Setup progress" role="list">
@@ -471,7 +477,20 @@ export function enrollmentPage(): Response {
       picture.hidden = false;
     }
     notice.hidden = true;
-    if (profile.authorized) done();
+    if (profile.desktop) {
+      element("desktop").hidden = false;
+      element("use-desktop").addEventListener("click", async () => {
+        element("use-desktop").disabled = true;
+        try { location.assign((await call("handoff")).url); }
+        catch (error) { element("desktop-error").textContent = error.message; element("use-desktop").disabled = false; }
+      });
+      element("use-browser").addEventListener("click", () => {
+        element("desktop").hidden = true;
+        if (profile.authorized) done();
+        else { element("key").value = profile.pubkey; element("setup").hidden = false; }
+      });
+    }
+    else if (profile.authorized) done();
     else {
       element("key").value = profile.pubkey;
       element("setup").hidden = false;
