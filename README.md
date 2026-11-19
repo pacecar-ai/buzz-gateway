@@ -188,7 +188,7 @@ Remove the temporary credential files after saving each key in Connect. The daem
 
 To offer links hosted by your gateway, set the Production variable `BUZZ_GATEWAY_ENROLLMENT` for a short setup window. Supply the gateway HTTPS `origin`, Buzz identity `adapter` base URL, expected `ownerPubkey`, an `expiresAt` timestamp in epoch milliseconds, and an `operatorDigest`. For each entry in `agents`, supply `id`, `inviteDigest`, and a Production-linked `connectorId` for its name and logo. You can also supply `name` and an optional HTTPS `picture` directly. Generate a separate random 32-byte base64url token for each invitation and another for operator access. Store their SHA-256 digests in the plan. Redeploy.
 
-Send the owner `<origin>/api/enroll#<agent-id>.<invite-token>`. The page shows the agent key to authorize in Buzz Desktop and starts Builderlab sign-in. When the browser returns to the loopback address, the owner pastes that address into the setup page. The gateway exchanges its single-use code with Buzz.
+Send the owner `<origin>/api/enroll#<agent-id>.<invite-token>`. The page shows the agent key to authorize in Buzz Desktop and starts sign-in with the community’s identity provider. When the browser returns to the loopback address, the owner pastes that address into the setup page. The gateway exchanges its single-use code with Buzz.
 
 POST `{"id":"<agent-id>","step":"collect"}` to `/api/enroll` with the operator bearer token to retrieve that agent's connector credential. After saving it in Vercel Connect, POST the same request with `"step":"clear"`. The authorization service keeps temporary records in private Blob for a day. Keep the invite and operator tokens private, and remove the plan after enrollment.
 

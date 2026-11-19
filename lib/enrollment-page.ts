@@ -275,7 +275,7 @@ export function enrollmentPage(): Response {
     <section id="signin" aria-labelledby="signin-heading" hidden>
       <h2 id="signin-heading" tabindex="-1">Sign in to Buzz</h2>
       <div id="login-prompt">
-        <p class="instructions">Sign in with Builderlab in a new tab. Keep this page open to finish setup.</p>
+        <p class="instructions">Sign in with your community’s identity provider in a new tab. Keep this page open to finish setup.</p>
         <p class="instructions" id="login-loading" role="status" hidden>Preparing the sign-in link…</p>
         <div class="actions">
           <a class="button primary" id="login" target="_blank" rel="noopener noreferrer" hidden>Open Buzz sign-in</a>
