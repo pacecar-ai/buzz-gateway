@@ -5,6 +5,7 @@ export type Versioned<T> = { value: T; etag: string };
 
 export interface State {
   read<T>(path: string): Promise<Versioned<T> | null>;
+  write<T>(path: string, value: T, ttlDays?: number): Promise<void>;
   create<T>(path: string, value: T, ttlDays?: number): Promise<boolean>;
   replace<T>(path: string, value: T, etag: string, ttlDays?: number): Promise<boolean>;
 }
@@ -46,6 +47,13 @@ export class BlobState implements State {
       if (error instanceof BlobPreconditionFailedError || await this.read(path)) return false;
       throw error;
     }
+  }
+
+  async write<T>(path: string, value: T, ttlDays?: number): Promise<void> {
+    await put(path, JSON.stringify(value), {
+      access: "private", contentType: "application/json", allowOverwrite: true,
+      cacheControlMaxAge: 60, ttlDays, abortSignal: AbortSignal.timeout(8000),
+    });
   }
 
   async replace<T>(path: string, value: T, etag: string, ttlDays?: number): Promise<boolean> {

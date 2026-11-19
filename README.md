@@ -46,11 +46,9 @@ The [workflow](.github/workflows/ci.yml) checks code and builds the eve adapter 
 | --- | --- |
 | Variable `VERCEL_ORG_ID` | Organization ID from `.vercel/project.json` |
 | Variable `VERCEL_PROJECT_ID` | Gateway project ID from `.vercel/project.json` |
-| Variable `VERCEL_TEAM_SLUG` | Slug of the Vercel team that owns the gateway |
-| Variable `BUZZ_GATEWAY_REGION` | Same value as the Vercel Production environment |
 | Production environment secret `VERCEL_TOKEN` | Vercel deploy credential scoped to your gateway project |
 
-The workflow uses a remote Vercel build for the daemon image. The project configuration disables automatic Git deployments so the Actions checks control release. Clones without a Vercel project variable can run CI independently.
+The workflow sends the checked commit to the [Vercel Deployments API](https://vercel.com/docs/rest-api/deployments/create-a-new-deployment) for a remote build. The project configuration disables automatic Git deployments so the Actions checks control release. Clones without a Vercel project variable can run CI independently.
 
 ## Enroll an eve agent
 

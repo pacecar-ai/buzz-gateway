@@ -41,19 +41,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - name: Install Vercel CLI
-        run: npm install --global vercel@66.2.0
       - name: Deploy the checked commit to Vercel
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
-          VERCEL_TEAM_SLUG: ${{ vars.VERCEL_TEAM_SLUG }}
-          BUZZ_GATEWAY_REGION: ${{ vars.BUZZ_GATEWAY_REGION }}
-        run: |
-          : "${VERCEL_TOKEN:?Set the VERCEL_TOKEN Actions secret}"
-          : "${VERCEL_ORG_ID:?Set the VERCEL_ORG_ID Actions variable}"
-          : "${VERCEL_PROJECT_ID:?Set the VERCEL_PROJECT_ID Actions variable}"
-          : "${VERCEL_TEAM_SLUG:?Set the VERCEL_TEAM_SLUG Actions variable}"
-          : "${BUZZ_GATEWAY_REGION:?Set the BUZZ_GATEWAY_REGION Actions variable}"
-          vercel deploy --prod --yes --non-interactive --scope "$VERCEL_TEAM_SLUG"
+        run: node scripts/deploy.mjs

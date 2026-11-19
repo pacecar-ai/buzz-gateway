@@ -60,9 +60,7 @@ export class GatewayWorker {
     while (!signal.aborted) {
       try {
         const heartbeat = { at: Date.now(), configured: this.#agents.size, connected: this.#active.size };
-        const previous = await this.#state.read(healthPath);
-        if (previous) await this.#state.replace(healthPath, heartbeat, previous.etag, 1);
-        else await this.#state.create(healthPath, heartbeat, 1);
+        await this.#state.write(healthPath, heartbeat, 1);
         if (!reported) log("info", "gateway_storage_ready", { registrations: this.#agents.size });
         reported = true;
       } catch (error) {

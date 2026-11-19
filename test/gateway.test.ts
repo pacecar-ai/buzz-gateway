@@ -24,14 +24,18 @@ class MemoryState implements State {
 
   async create<T>(path: string, value: T): Promise<boolean> {
     if (this.entries.has(path)) return false;
-    this.entries.set(path, { value: structuredClone(value), etag: String(++this.#version) });
+    await this.write(path, value);
     return true;
   }
 
   async replace<T>(path: string, value: T, etag: string): Promise<boolean> {
     if (this.entries.get(path)?.etag !== etag) return false;
-    this.entries.set(path, { value: structuredClone(value), etag: String(++this.#version) });
+    await this.write(path, value);
     return true;
+  }
+
+  async write<T>(path: string, value: T): Promise<void> {
+    this.entries.set(path, { value: structuredClone(value), etag: String(++this.#version) });
   }
 }
 
