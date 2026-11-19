@@ -5,20 +5,21 @@ import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey, type Event, type EventTemplate } from "nostr-tools/pure";
 import { z } from "zod";
 import type { Agent } from "./config.ts";
-import { readDesktopGrant, WaitingForOwner } from "./desktop-grants.ts";
+import { readDesktopGrant, readDesktopOwnership, saveDesktopOwnership, WaitingForOwner } from "./desktop-grants.ts";
+import { ownerProof, ownerProofFor, type OwnerProof } from "./owner-proof.ts";
 import type { State } from "./state.ts";
 import { hexId } from "./protocol.ts";
 
-const ownerAttestation = z.tuple([z.literal("auth"), hexId, z.string().max(2048), z.string().regex(/^[a-f0-9]{128}$/)]);
 const federatedGrant = z.object({
   grant: z.string().regex(/^\S+$/).max(1024),
   issuer: z.url(),
   ownerPubkey: hexId,
+  ownerAttestation: ownerProof.optional(),
 });
 const credentials = z.object({
   signingKey: z.string().trim().min(1).max(128),
   actionKey: z.string().optional(),
-  ownerAttestation: ownerAttestation.optional(),
+  ownerAttestation: ownerProof.optional(),
   federated: federatedGrant.optional(),
 });
 const issued = z.object({
@@ -31,7 +32,19 @@ export type Signer = {
   sign(template: EventTemplate): Event;
   ownerTag?: string[];
   assertion?: { token: string; expiresAt: number };
+  profileOwnership?: {
+    owner: string;
+    proof?: OwnerProof;
+    read?: () => Promise<OwnerProof | undefined>;
+    save?: (proof: OwnerProof) => Promise<OwnerProof>;
+  };
 };
+
+export function credentialProfileProof(agent: Agent, owner: string, credential: z.infer<typeof credentials>): OwnerProof | undefined {
+  const now = Math.floor(Date.now() / 1000);
+  return ownerProofFor(agent.pubkey, owner, credential.ownerAttestation, 0, now)
+    ?? ownerProofFor(agent.pubkey, owner, credential.federated?.ownerAttestation, 0, now);
+}
 
 export class CredentialRefusedError extends Error {
   constructor() {
@@ -56,10 +69,16 @@ export async function loadSigner(agent: Agent, state?: State): Promise<Signer> {
     if (!grant && agent.desktop) throw new WaitingForOwner();
     if (!grant || (agent.desktop && grant.ownerPubkey !== agent.desktop.ownerPubkey)) throw new CredentialRefusedError();
     const assertion = await requestAssertion(agent, agent.federatedIdentityAdapter, grant, sign);
-    return { sign, assertion };
+    const proof = credentialProfileProof(agent, grant.ownerPubkey, credential);
+    const stored = agent.desktop && state ? {
+      read: () => readDesktopOwnership(agent, secret, state),
+      save: (proof: OwnerProof) => saveDesktopOwnership(agent, secret, state, proof),
+    } : undefined;
+    return { sign, assertion, profileOwnership: { owner: grant.ownerPubkey, proof: proof ?? await stored?.read(), ...stored } };
   }
   if (credential.federated) throw new CredentialRefusedError();
-  return { sign, ownerTag: credential.ownerAttestation };
+  const tag = credential.ownerAttestation;
+  return { sign, ownerTag: tag, profileOwnership: tag && { owner: tag[1], proof: credentialProfileProof(agent, tag[1], credential) } };
 }
 
 export async function fromConnect(connector: string): Promise<z.infer<typeof credentials>> {

@@ -293,7 +293,7 @@ export function apply(ctx) {
       if (!rows.has(agent.pubkey)) rows.set(agent.pubkey, { pubkey: agent.pubkey, name: agent.name, picture: agent.picture });
       rows.get(agent.pubkey).native = agent;
     }
-    async function connect(selected) {
+    async function connect(selected, teams = false) {
       if (!active() || pending || busy) return;
       const rows = Array.isArray(selected) ? selected : [selected];
       const before = identity;
@@ -303,13 +303,18 @@ export function apply(ctx) {
       const valid = () => alive && scopeKey() === before && !controller.signal.aborted;
       const off = ctx.communityReader.subscribe(() => { if (scopeKey() !== before) controller.abort(); });
       try {
-        if (rows.length > 1 && fresh.length) {
+        if (teams || (rows.length > 1 && fresh.length)) {
           const proofs = [];
-          for (const row of fresh) {
+          for (const row of teams ? rows : fresh) {
             if (!valid()) return;
             const auth = await ctx.host.prepareRemoteAgentAuthorization(row.pubkey, controller.signal);
             if (auth[1] !== scope().owner) throw new Error("The Buzz identity changed. Open your invitation again.");
             proofs.push({ id: row.id, pubkey: row.pubkey, proof: auth });
+          }
+          if (teams) {
+            await call(state.invitation, { step: "teams", members: proofs }, controller.signal);
+            if (valid()) setConfirmation("Ownership approved. Open your team when the agents show Ready for teams.");
+            return;
           }
           await authorize(proofs, controller.signal);
         }
@@ -333,6 +338,16 @@ export function apply(ctx) {
     const remaining = visible.filter(row => row.id && !row.unavailable && (!row.native || row.native.unfinished));
     const disabled = Boolean(busy || current || state.loading || roster.status !== "ready");
     const bulk = remaining.length > 1 && remaining.length <= 8 && state.expiresAt > Date.now() && ctx.host.prepareRemoteAgentAuthorization;
+    const repairable = visible.filter(row => row.native && !row.native.unfinished && row.teams === "needs-approval" && !row.unavailable);
+    const syncing = visible.some(row => row.teams === "syncing");
+    React.useEffect(() => {
+      if (!syncing || !state.invitation) return;
+      const timer = setInterval(() => {
+        if (active() && !model.loading && !pending && model.expiresAt > Date.now()) void load(state.invitation);
+      }, 5000);
+      const end = setTimeout(() => clearInterval(timer), 60_000);
+      return () => { clearInterval(timer); clearTimeout(end); };
+    }, [syncing, state.invitation]);
     async function syncProfile(row) {
       if (!active() || disabled) return;
       setBusy(row.pubkey); setFeedback(""); setConfirmation("");
@@ -355,7 +370,9 @@ export function apply(ctx) {
           const changed = listed && canConnect && !row.unavailable &&
             (row.native.name !== row.name || (row.native.picture || "") !== (row.picture || ""));
           const status = row.retry ? "Connection unavailable · Refresh to retry"
-            : listed ? (row.unavailable ? "In Agents · Check connection" : row.online ? "In Agents · Online" : "In Agents")
+            : listed ? (row.unavailable ? "In Agents · Check connection" : row.teams === "syncing" ? "Syncing team access…"
+              : row.teams === "needs-approval" ? "In Agents · Approve to join teams" : row.teams === "ready" ? "Ready for teams"
+              : row.online ? "In Agents · Online" : "In Agents")
             : row.unavailable ? "Buzz declined this grant" : !canConnect ? "Open a new setup link to connect" : row.approved ? "Approved · Ready to add" : "Needs your approval";
           return h("li", { key: row.pubkey, style: { display: "flex", gap: ".85rem", alignItems: "center", flexWrap: "wrap",
             padding: "1rem 0", borderBottom: "1px solid var(--color-border-subtle, #85858555)" } },
@@ -364,13 +381,17 @@ export function apply(ctx) {
             h("div", { style: { flex: "1 1 12rem" } }, h("strong", null, row.name),
               h("div", { className: "text-body-sm text-secondary" }, status),
               row.manageUrl && link("Manage in Vercel", row.manageUrl)),
-            changed ? button("Update profile in Buzz", () => syncProfile(row), disabled)
-              : listed ? button("Open Agents", () => active() && openAgents())
+            changed && button("Update profile in Buzz", () => syncProfile(row), disabled),
+            listed && canConnect && row.teams === "needs-approval" && ctx.host.prepareRemoteAgentAuthorization
+              ? button("Enable teams", () => connect(row, true), disabled)
+              : listed ? !changed && button("Open Agents", () => active() && openAgents())
               : button(row.approved ? "Add to Buzz" : "Connect", () => connect(row),
                 Boolean(!canConnect || row.unavailable || disabled), !bulk));
         })),
       bulk &&
         h("div", null, button("Connect all " + remaining.length + " agents", () => connect(remaining), disabled, true)),
+      repairable.length > 1 && repairable.length <= 8 && state.expiresAt > Date.now() && ctx.host.prepareRemoteAgentAuthorization &&
+        h("div", null, button("Enable teams for all " + repairable.length + " agents", () => connect(repairable, true), disabled, true)),
       current?.url ? h("section", { "aria-label": "Buzz sign-in", style: stack },
         h("strong", null, "Finish connecting " + current.label),
         link("Continue to Buzz sign-in", current.url),
@@ -384,6 +405,8 @@ export function apply(ctx) {
         button("Cancel sign-in", stop)) : current?.text && h("p", { role: "status" }, current.text),
       visible.some(row => !row.native || row.native.unfinished) && h("p", { className: "text-body-sm text-secondary" },
         "Connecting authorizes each selected Buzz identity to act for you and publish under its own name. The ownership proof has no time or event-kind limit."),
+      repairable.length > 0 && h("p", { className: "text-body-sm text-secondary" },
+        "Enabling teams publishes your signed ownership approval on each selected agent’s Buzz profile. Buzz uses it to let you add that agent to teams."),
       state.invitation && h("div", null, button("Refresh connectors", () => active() && load(state.invitation), disabled)));
   }
   ctx.settingsCards.register({ id: "agents", title: "Vercel", icon: VercelMark, group: "Plugins", component: Directory });

@@ -1,14 +1,15 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { schnorr } from "@noble/curves/secp256k1.js";
 import { finalizeEvent } from "nostr-tools/pure";
 import { z } from "zod";
 import type { Agent } from "./config.ts";
 import { readConnectProfile } from "./connect-profile.ts";
-import { CredentialRefusedError, fromConnect, requestAssertion, signingKey } from "./credentials.ts";
-import { ApprovalBusy, desktopGrantPath, issueDesktopGrant, readDesktopGrant, type DesktopGrant } from "./desktop-grants.ts";
+import { credentialProfileProof, CredentialRefusedError, fromConnect, requestAssertion, signingKey } from "./credentials.ts";
+import { ApprovalBusy, desktopGrantPath, issueDesktopGrant, publishedOwnershipPath, readDesktopGrant, readDesktopOwnership,
+  saveDesktopOwnership, type DesktopGrant } from "./desktop-grants.ts";
 import { enrollAgent, exchangeLogin, loginUrl, ownerProof } from "./enrollment.ts";
 import { errorName, log } from "./log.ts";
-import { healthPath, hexId, readJson, registrationId } from "./protocol.ts";
+import { verifyOwner } from "./owner-proof.ts";
+import { healthPath, hexId, readJson, registrationId, stableId } from "./protocol.ts";
 import type { State } from "./state.ts";
 
 export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
@@ -68,6 +69,7 @@ const multiple = base.extend({ members: z.array(selected).min(1).max(8).refine(r
   new Set(rows.map(row => row.id)).size === rows.length) });
 const input = z.discriminatedUnion("step", [
   base.extend({ step: z.literal("list") }),
+  multiple.extend({ step: z.literal("teams") }),
   multiple.extend({ step: z.literal("batch-approve") }),
   multiple.extend({ step: z.literal("batch-start"), ...browserReturn }),
   multiple.extend({ step: z.literal("batch-finish"), attempt: opaque, code: z.string().regex(/^[A-Za-z0-9_-]{1,2048}$/) }),
@@ -75,12 +77,6 @@ const input = z.discriminatedUnion("step", [
   member.extend({ step: z.literal("start"), ...browserReturn }),
   member.extend({ step: z.literal("finish"), attempt: opaque, code: z.string().regex(/^[A-Za-z0-9_-]{1,2048}$/) }),
 ]);
-
-export function verifyOwner(pubkey: string, owner: string, proof: z.infer<typeof ownerProof>): boolean {
-  if (proof[1] !== owner || proof[2] !== "") return false;
-  const message = createHash("sha256").update("nostr:agent-auth:" + pubkey + ":").digest();
-  return schnorr.verify(Buffer.from(proof[3], "hex"), message, Buffer.from(owner, "hex"));
-}
 
 const providers = { profile: readConnectProfile, credential: fromConnect, exchange: exchangeLogin, enroll: enrollAgent,
   async usable(agent: Agent, key: Uint8Array, grant: DesktopGrant) {
@@ -143,7 +139,13 @@ export async function handleDesktop(request: Request, agents: Map<string, Agent>
           if (grant && grant.ownerPubkey !== invite.owner) throw new Error("Connector owner changed");
           const online = Boolean(heart && Date.now() - heart.at < 180_000 && heart.online?.includes(agent.id));
           const unavailable = Boolean(grant && !online && !await services.usable(agent, key, grant));
-          return { ...identity, ...profile, approved: Boolean(grant) && !unavailable, online, unavailable };
+          let teams: "needs-approval" | "syncing" | "ready" | undefined;
+          if (grant && !unavailable) {
+            const proof = credentialProfileProof(agent, invite.owner, credential) ?? await readDesktopOwnership(agent, key, state);
+            const published = proof && await state.read<{ proofDigest: string }>(publishedOwnershipPath(agent));
+            teams = !proof ? "needs-approval" : published?.value.proofDigest === stableId(...proof) ? "ready" : "syncing";
+          }
+          return { ...identity, ...profile, approved: Boolean(grant) && !unavailable, online, unavailable, teams };
         } catch (error) {
           log("warn", "buzz_desktop_connector_unavailable", { registrationId: agent.id, error: errorName(error) });
           return { ...identity, ...profile, approved: false, online: false, unavailable: true, retry: true };
@@ -174,7 +176,9 @@ export async function handleDesktop(request: Request, agents: Map<string, Agent>
     }));
     if (jobs.some(job => !job.usable)) return reply({ error: "Buzz declined an existing grant. Ask the gateway owner to renew that connector." }, 409);
     const pending = jobs.filter(job => !job.approved);
-    if (!pending.length) return reply({ approved: true });
+    if (body.step === "teams" && pending.length) return reply({ error: "Connect these agents to Buzz before enabling teams." }, 409);
+    await Promise.all(jobs.filter(job => job.approved).map(job => saveDesktopOwnership(job.agent, job.key, state, job.proof)));
+    if (body.step === "teams" || !pending.length) return reply({ approved: true });
     if (body.step === "approve" || body.step === "batch-approve") return reply({ approved: false });
     const selection = digest(JSON.stringify(jobs.map(job => binding(job.agent)).sort()));
     if (body.step === "start" || body.step === "batch-start") {
@@ -209,6 +213,7 @@ export async function handleDesktop(request: Request, agents: Map<string, Agent>
       results = await Promise.allSettled(pending.map(async job => {
         await issueDesktopGrant(job.agent, job.key, state, () =>
           services.enroll(adapter, session, Buffer.from(job.key).toString("hex"), job.proof));
+        await saveDesktopOwnership(job.agent, job.key, state, job.proof);
         log("info", "buzz_desktop_authorized", { registrationId: job.agent.id });
       }));
     } finally {

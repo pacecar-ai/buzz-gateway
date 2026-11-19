@@ -4,6 +4,7 @@ import type { Event } from "nostr-tools/pure";
 import { z } from "zod";
 import { postToProject } from "./auth.ts";
 import { publishActivity } from "./activity.ts";
+import { publishAgentProfile, type PublishedProfile } from "./agent-profile.ts";
 import { actionEvent, inboundMessage, roomDirectness } from "./buzz.ts";
 import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
 import type { Agent } from "./config.ts";
@@ -12,6 +13,7 @@ import { CredentialRefusedError, loadSigner, type Signer } from "./credentials.t
 import { desktopGrantPath, WaitingForOwner } from "./desktop-grants.ts";
 import { errorName, log } from "./log.ts";
 import { readRooms, relaySigningKey, sameRooms, type BuzzRooms } from "./memberships.ts";
+import { ownerProofFor } from "./owner-proof.ts";
 import {
   actionId, actionJobSchema, deliveryPath, deliverySchema, deliveryStatusHeader, eveDeliveryPath, eveResultPath, healthPath,
   hexId, inboxTopic, outboxTopic, queueRetentionSeconds, receiptRetentionDays, receiptSchema, registrationId, typingLifetimeMs,
@@ -29,7 +31,7 @@ type LiveAgent = {
   socket: BuzzSocket;
   lease: Lease;
   membership?: { relayKey: string; rooms: BuzzRooms };
-  publishedProfile?: string;
+  publishedProfile?: PublishedProfile;
 };
 type PublishedAction = { event?: Event; published?: boolean; rejected?: boolean };
 type WorkerQueue = Pick<GatewayQueue, "poll" | "sendDelivery" | "sendReconciliation">;
@@ -259,8 +261,18 @@ export class GatewayWorker {
       ticks += 1;
       if (this.#active.get(agent.id) !== active) continue;
       if (ticks % 4 === 0) await this.#presence(agent, active.socket, "online");
-      if (ticks % 20 === 0 && agent.profileFromConnector && agent.credentialConnector) {
-        await this.#refreshConnectProfile(active, agent.credentialConnector);
+      if (agent.profileFromConnector && agent.credentialConnector) {
+        const ownership = active.socket.signer.profileOwnership;
+        let repair = false;
+        if (!active.publishedProfile?.attested && ownership?.read) {
+          try {
+            const proof = ownerProofFor(agent.pubkey, ownership.owner, ownership.proof, 0, issuerEpoch()) ?? await ownership.read();
+            if (proof) { ownership.proof = proof; repair = true; }
+          } catch (error) {
+            log("warn", "buzz_profile_ownership_retry", { registrationId: agent.id, error: errorName(error) });
+          }
+        }
+        if (repair || ticks % 20 === 0) await this.#refreshConnectProfile(active, agent.credentialConnector);
       }
     }
   }
@@ -275,16 +287,11 @@ export class GatewayWorker {
   }
 
   async #publishProfile(active: LiveAgent, profile: { name: string; description?: string; picture?: string }): Promise<void> {
-    const content = JSON.stringify({
-      name: profile.name, display_name: profile.name, about: profile.description, picture: profile.picture,
+    const previous = active.publishedProfile;
+    active.publishedProfile = await publishAgentProfile(active.socket, this.#state, profile, previous);
+    if (active.publishedProfile !== previous) log("info", "buzz_profile_published", {
+      registrationId: active.socket.agent.id, teams: active.publishedProfile.attested,
     });
-    if (content === active.publishedProfile) return;
-    const { socket } = active;
-    const created_at = issuerEpoch();
-    await socket.publish(socket.signer.sign({ kind: 0, tags: [], content, created_at }));
-    await socket.publish(socket.signer.sign({ kind: 10100, tags: [], content, created_at }));
-    active.publishedProfile = content;
-    log("info", "buzz_profile_published", { registrationId: socket.agent.id });
   }
 
   async #presence(agent: Agent, socket: BuzzSocket, status: "online"): Promise<void> {

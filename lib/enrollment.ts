@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { z } from "zod";
 import { nostrAuthorization } from "./credentials.ts";
+import { ownerProof, ownerProofFor } from "./owner-proof.ts";
 import { hexId } from "./protocol.ts";
 
 const grantType = "urn:nostr:params:oauth:token-type:nip-fi-agent-grant";
 const expiry = z.iso.datetime({ offset: true });
 const session = z.object({ session_token: z.string().min(1).max(2048), expires_at: expiry });
-export const ownerProof = z.tuple([z.literal("auth"), hexId, z.string().max(2048), z.string().regex(/^[a-f0-9]{128}$/)]);
+export { ownerProof };
 const agentGrant = z.object({
   access_token: z.string().regex(/^\S+$/).max(1024),
   issued_token_type: z.literal(grantType),
@@ -74,7 +75,9 @@ export async function enrollAgent(adapter: string, userSession: string, signingK
     body,
   }));
   if (grant.nostr_owner_pubkey !== proof[1] || grant.nostr_owner_pubkey === pubkey) throw new EnrollmentRefused(403, route);
-  return { grant: grant.access_token, issuer: grant.nip_fi_issuer, ownerPubkey: grant.nostr_owner_pubkey };
+  const profileProof = ownerProofFor(pubkey, grant.nostr_owner_pubkey, proof, 0, Math.floor(Date.now() / 1000));
+  return { grant: grant.access_token, issuer: grant.nip_fi_issuer, ownerPubkey: grant.nostr_owner_pubkey,
+    ...(profileProof && { ownerAttestation: profileProof }) };
 }
 
 function endpoint(adapter: string, name: string): string {

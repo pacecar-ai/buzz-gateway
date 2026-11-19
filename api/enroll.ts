@@ -4,8 +4,9 @@ import { z } from "zod";
 import { readConnectProfile } from "../lib/connect-profile.ts";
 import { loadAgents, type Agent } from "../lib/config.ts";
 import { fromConnect, signingKey as verifySigningKey } from "../lib/credentials.ts";
-import { createHandoff, verifyOwner } from "../lib/desktop.ts";
-import { issueDesktopGrant, readDesktopGrant } from "../lib/desktop-grants.ts";
+import { createHandoff } from "../lib/desktop.ts";
+import { issueDesktopGrant, readDesktopGrant, saveDesktopOwnership } from "../lib/desktop-grants.ts";
+import { verifyOwner } from "../lib/owner-proof.ts";
 import { enrollAgent, EnrollmentRefused, exchangeLogin, loginUrl, ownerProof } from "../lib/enrollment.ts";
 import { enrollmentPage } from "../lib/enrollment-page.ts";
 import { errorName, log } from "../lib/log.ts";
@@ -160,7 +161,9 @@ export async function handleEnrollment(request: Request, configuration: string |
       const issue = async () => enrollAgent(plan.data.adapter, await exchangeLogin(plan.data.adapter, code, attempt.verifier), signingKey, proof);
       let completed: Draft;
       if (desktop) {
-        await issueDesktopGrant(desktop, verifySigningKey(signingKey, pubkey), state, issue);
+        const key = verifySigningKey(signingKey, pubkey);
+        await issueDesktopGrant(desktop, key, state, issue);
+        await saveDesktopOwnership(desktop, key, state, proof);
         completed = { pubkey, collected: true };
       } else {
         completed = { ...draft.value, grant: await issue(), attempt: undefined, lockedUntil: undefined };

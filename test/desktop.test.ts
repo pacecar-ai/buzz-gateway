@@ -5,10 +5,15 @@ import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { schnorr } from "@noble/curves/secp256k1.js";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event } from "nostr-tools/pure";
+import { publishAgentProfile } from "../lib/agent-profile.ts";
 import { loadAgents, type Agent } from "../lib/config.ts";
 import { createHandoff, handleDesktop } from "../lib/desktop.ts";
-import { desktopGrantPath, readDesktopGrant } from "../lib/desktop-grants.ts";
+import { desktopGrantPath, issueDesktopGrant, publishedOwnershipPath, readDesktopGrant, readDesktopOwnership,
+  saveDesktopOwnership } from "../lib/desktop-grants.ts";
+import { credentialProfileProof, type Signer } from "../lib/credentials.ts";
+import { enrollAgent } from "../lib/enrollment.ts";
+import { ownerProofFor, type OwnerProof } from "../lib/owner-proof.ts";
 import type { State, Versioned } from "../lib/state.ts";
 
 class FixtureState implements State {
@@ -106,6 +111,7 @@ test("one desktop sign-in approves separately signed connectors and preserves co
   assert.equal(new Set(f.issued).size, 2);
   const one = f.agents.get("one")!;
   assert.equal((await readDesktopGrant(one, f.keys.get("one")!, f.state))?.grant, "grant-for-" + one.pubkey);
+  assert.deepEqual(await readDesktopOwnership(one, f.keys.get("one")!, f.state), selected[0].proof);
   const stored = JSON.stringify([...f.state.records.values()]);
   assert(!stored.includes("human-session-fixture") && !stored.includes("grant-for-") && !stored.includes(selected[0].proof[3]));
   assert(!JSON.stringify(listed).includes("signingKey") && !stored.includes(ref));
@@ -114,6 +120,110 @@ test("one desktop sign-in approves separately signed connectors and preserves co
   f.services.usable = async () => false;
   assert.equal((await (await f.post(ref, { step: "list" })).json()).agents[0].unavailable, true);
   assert.equal((await f.post(ref, { step: "approve", ...selected[0] })).status, 409);
+});
+
+test("existing Blob and Connect agents enable teams without replacing their grants or opening sign-in", async () => {
+  const f = fixture(["one", "two", "three"]);
+  const [one, two, three] = [...f.agents.values()];
+  const ref = await createHandoff([one, two, three], f.state, Date.now() + 60_000);
+  const grant = { ownerPubkey: owner, issuer: adapter, grant: "fixture-existing-grant" };
+  await issueDesktopGrant(one, f.keys.get("one")!, f.state, async () => grant);
+  const original = await f.state.read(desktopGrantPath(one));
+  const credential = f.services.credential;
+  f.services.credential = async id => ({ ...await credential(id), ...(id === "scl_two" && { federated: grant }) });
+  const members = [one, two].map(f.proof);
+  const listed = async () => (await (await f.post(ref, { step: "list" })).json()).agents;
+  assert.deepEqual((await listed()).map((row: { teams?: string }) => row.teams), ["needs-approval", "needs-approval", undefined]);
+  assert.equal((await f.post(ref, { step: "teams", members: [...members, f.proof(three)] })).status, 409);
+  assert.equal((await f.post(ref, { step: "teams", members: [{ ...members[0], proof: members[1].proof }] })).status, 403);
+  assert.equal(await readDesktopOwnership(one, f.keys.get("one")!, f.state), undefined);
+  const repair = () => f.post(ref, { step: "teams", members });
+  const attempts = await Promise.all([repair(), repair()]);
+  assert(attempts.every(result => result.status === 200));
+  assert.deepEqual((await listed()).map((row: { teams?: string }) => row.teams), ["syncing", "syncing", undefined]);
+  assert.equal(f.exchanges(), 0);
+  assert.equal(f.issued.length, 0);
+  assert.deepEqual(await f.state.read(desktopGrantPath(one)), original);
+  assert.equal(await f.state.read(desktopGrantPath(two)), null);
+  assert.deepEqual(await readDesktopOwnership(two, f.keys.get("two")!, f.state), members[1].proof);
+  assert(!JSON.stringify([...f.state.records.values()]).includes(members[0].proof[3]));
+  await assert.rejects(readDesktopOwnership(one, f.keys.get("two")!, f.state));
+});
+
+test("standalone enrollment retains only a verified profile proof in the agent's Connect credential", async t => {
+  const f = fixture(["one", "two"]);
+  const [one, two] = [...f.agents.values()];
+  const secret = Buffer.from(f.keys.get("one")!).toString("hex");
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    access_token: "fixture-standalone-grant", issued_token_type: "urn:nostr:params:oauth:token-type:nip-fi-agent-grant",
+    token_type: "N_A", nostr_owner_pubkey: owner, nip_fi_issuer: adapter,
+  }));
+  const proof = f.proof(one).proof as OwnerProof;
+  const federated = await enrollAgent(adapter, "fixture-session", secret, proof);
+  assert.deepEqual(credentialProfileProof(one, owner, { signingKey: secret, federated }), proof);
+  const invalid = await enrollAgent(adapter, "fixture-session", secret, f.proof(two).proof as OwnerProof);
+  assert.equal(invalid.ownerAttestation, undefined);
+});
+
+test("recovers only a signed, owner-bound public attestation that permits the new profile, and preserves it on edits", async () => {
+  const f = fixture(["one", "other"]);
+  const [agent, other] = [...f.agents.values()];
+  const key = f.keys.get("one")!;
+  const sign: Signer["sign"] = template => finalizeEvent(template, key);
+  const now = Math.floor(Date.now() / 1000);
+  const proof = f.proof(agent).proof as OwnerProof;
+  function conditional(conditions: string): OwnerProof {
+    const message = createHash("sha256").update(`nostr:agent-auth:${agent.pubkey}:${conditions}`).digest();
+    return ["auth", owner, conditions, Buffer.from(schnorr.sign(message, ownerKey)).toString("hex")];
+  }
+  const profileEvent = (tags: string[][], kind = 0) => sign({ kind, tags, created_at: now - 10, content: "{}" });
+  const ownership: NonNullable<Signer["profileOwnership"]> = { owner,
+    save: p => saveDesktopOwnership(agent, key, f.state, p) };
+  const old = profileEvent([]);
+  const invalid = [
+    profileEvent([f.proof(other).proof]),
+    profileEvent([conditional("kind=10100")], 10100),
+    profileEvent([conditional("created_at<" + now)]),
+    profileEvent([proof, proof]),
+    { ...profileEvent([proof]), sig: "0".repeat(128) },
+  ];
+  const notes = [profileEvent([proof], 1)];
+  const published: Event[] = [];
+  let head = old, showOldHead = true;
+  const socket = {
+    agent, signer: { sign, profileOwnership: ownership },
+    async publish(event: Event) {
+      assert(verifyEvent(event));
+      if (event.kind === 0) head = event;
+      published.push(event);
+    },
+    async query(filter: { kinds?: number[]; limit: number }) {
+      if (filter.kinds?.length === 1) return showOldHead ? [old] : [head];
+      return filter.kinds?.includes(1) ? notes : invalid;
+    },
+  };
+  const profile = { name: "Test agent" };
+  await assert.rejects(publishAgentProfile(socket, f.state, profile), /has not confirmed/);
+  assert.equal(await f.state.read(publishedOwnershipPath(agent)), null);
+  assert.deepEqual(await readDesktopOwnership(agent, key, f.state), proof);
+  showOldHead = false;
+  const first = await publishAgentProfile(socket, f.state, profile);
+  assert(first.attested);
+  assert.deepEqual(await publishAgentProfile(socket, f.state, profile, first), first);
+  const count = published.length;
+  await publishAgentProfile(socket, f.state, { ...profile, name: "Renamed", picture: "https://example.org/new.png" }, first);
+  assert.equal(published.length, count + 2);
+  assert(published.every(event => event.kind === 0 ? !!ownerProofFor(agent.pubkey, owner, event.tags[0], 0, event.created_at)
+    : event.kind === 10100 && event.tags.length === 0));
+  const record = await f.state.read<{ eventId: string }>(publishedOwnershipPath(agent));
+  assert.equal(record?.value.eventId, head.id);
+  assert(!JSON.stringify(record).includes(proof[3]));
+
+  const grant = { ownerPubkey: owner, issuer: adapter, grant: "fixture-existing" };
+  await issueDesktopGrant(agent, key, f.state, async () => grant);
+  const ref = await createHandoff([agent], f.state, Date.now() + 60_000);
+  const [row] = (await (await f.post(ref, { step: "list" })).json()).agents;
+  assert.equal(row.teams, "ready");
 });
 
 test("invitation, owner, identity, lease and expiry bind a desktop sign-in", async () => {
