@@ -5,7 +5,7 @@ import { z } from "zod";
 import { postToProject } from "./auth.ts";
 import { publishActivity } from "./activity.ts";
 import { publishAgentProfile, type PublishedProfile } from "./agent-profile.ts";
-import { actionEvent, inboundMessage, roomDirectness } from "./buzz.ts";
+import { actionEvent, inboundMessage, isOneToOneDm, roomDirectness } from "./buzz.ts";
 import { BuzzSocket, RelayRejectedError } from "./buzz-socket.ts";
 import type { Agent } from "./config.ts";
 import { readConnectProfile } from "./connect-profile.ts";
@@ -333,7 +333,7 @@ export class GatewayWorker {
     if (!agent || agent.namespace !== reference.namespace) { log("warn", "inbox_registration_retired"); return; }
     const path = deliveryPath(reference);
     const record = await this.#state.read<DeliveryRecord>(path);
-    if (!record || record.value.completed || !this.#deliveryAllowed(agent, record.value)) return;
+    if (!record || record.value.completed || !await this.#deliveryAllowed(agent, record.value)) return;
     const location = { community: new URL(agent.relayUrl).origin, roomId: record.value.target.channelId };
     const settleDenied = async (response: Response): Promise<boolean> => {
       if (response.status !== 403 || response.headers.get(deliveryStatusHeader) !== "denied") return false;
@@ -356,7 +356,7 @@ export class GatewayWorker {
       return;
     }
     if (!record.value.receipt) {
-      const response = await this.#post(agent.eveUrl, eveDeliveryPath, { ...job.delivery, ...location });
+      const response = await this.#post(agent.eveUrl, eveDeliveryPath, { ...record.value.delivery, text: job.delivery.text, ...location });
       if (await settleDenied(response)) return;
       if (response.status !== 202) {
         log("warn", "eve_delivery_retry", { registrationId: agent.id, eventId: reference.eventId, status: response.status });
@@ -376,7 +376,7 @@ export class GatewayWorker {
       await Promise.all([...this.#typing].map(async ([key, { agent, record, expires }]) => {
         const active = this.#active.get(agent.id);
         try {
-          if (!active || expires < Date.now() || !this.#isLive(active) || !this.#deliveryAllowed(agent, record)) {
+          if (!active || expires < Date.now() || !this.#isLive(active) || !await this.#deliveryAllowed(agent, record, false)) {
             this.#typing.delete(key);
             return;
           }
@@ -401,7 +401,7 @@ export class GatewayWorker {
     const id = actionId(action);
     const path = `${agent.namespace}/outbox/${id}.json`;
     const record = await this.#state.read<DeliveryRecord>(deliveryPath(action));
-    if (!record || !this.#deliveryAllowed(agent, record.value)) return;
+    if (!record || !await this.#deliveryAllowed(agent, record.value, action.kind !== "typing")) return;
     const { target } = record.value;
     const pulseKey = deliveryPath(action);
     if (action.kind === "status") {
@@ -449,15 +449,22 @@ export class GatewayWorker {
     });
   }
 
-  #deliveryAllowed(agent: Agent, record: DeliveryRecord): boolean {
+  async #deliveryAllowed(agent: Agent, record: DeliveryRecord, refreshPair = true): Promise<boolean> {
     const active = this.#active.get(agent.id);
     if (agent.roomAccess === "membership" && (!active || !this.#isLive(active) || !active.membership)) {
       throw new Error("Waiting for a Buzz membership snapshot");
     }
-    if (record.delivery.visibility === "private" && agent.roomAccess === "membership"
-      && active?.membership?.rooms.get(record.target.channelId)?.visibility !== "private") return false;
     const { delivery, target } = record;
-    return roomDirectness(agent, target.channelId, target.author, active?.membership?.rooms) === delivery.direct;
+    const rooms = active?.membership?.rooms;
+    if (delivery.oneToOne) {
+      if (!active?.membership || !isOneToOneDm(agent, target.channelId, target.author, rooms)) return false;
+      if (!refreshPair) return true;
+      const current = await readRooms(active.socket, active.membership.relayKey, target.channelId);
+      return this.#isLive(active) && isOneToOneDm(agent, target.channelId, target.author, current);
+    }
+    if (delivery.visibility === "private" && agent.roomAccess === "membership"
+      && rooms?.get(target.channelId)?.visibility !== "private") return false;
+    return roomDirectness(agent, target.channelId, target.author, rooms) === delivery.direct;
   }
 }
 

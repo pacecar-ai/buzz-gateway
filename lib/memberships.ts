@@ -23,12 +23,14 @@ export async function relaySigningKey(relayUrl: string): Promise<string> {
   return z.object({ self: hexId }).parse(await response.json()).self;
 }
 
-export async function readRooms(socket: BuzzSocket, relayKey: string): Promise<BuzzRooms> {
+export async function readRooms(socket: BuzzSocket, relayKey: string, roomId?: string): Promise<BuzzRooms> {
   const agentKey = socket.agent.pubkey;
   const members = new Map<string, Pick<BuzzRoom, "members" | "rosterAt">>();
   // Buzz returns signed group records filtered by the authenticated agent's memberships.
-  const memberEvents = await socket.query({ kinds: [memberKind], authors: [relayKey], "#p": [agentKey], limit: roomLimit });
+  const memberEvents = await socket.query({ kinds: [memberKind], authors: [relayKey], "#p": [agentKey],
+    ...(roomId ? { "#d": [roomId], limit: 1 } : { limit: roomLimit }) });
   for (const [id, event] of latestGroups(memberEvents, memberKind, relayKey)) {
+    if (roomId && id !== roomId) continue;
     const keys = new Set(event.tags.filter(tag => tag[0] === "p" && hexId.safeParse(tag[1]).success).map(tag => tag[1]));
     if (keys.has(agentKey)) members.set(id, { members: keys, rosterAt: event.created_at });
   }
