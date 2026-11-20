@@ -11,6 +11,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent, type Event
 import { WebSocketServer } from "ws";
 import { handleEnrollment } from "../api/enroll.ts";
 import { acceptAction } from "../lib/actions.ts";
+import { inboundMessage } from "../lib/buzz.ts";
 import { loadAgents } from "../lib/config.ts";
 import { CredentialRefusedError, loadSigner } from "../lib/credentials.ts";
 import {
@@ -47,6 +48,7 @@ class MemoryState implements State {
 }
 
 class MemoryQueue {
+  readonly outboxHandled = Promise.withResolvers<void>();
   #inbox: InboxJob[] = [];
   #outbox: ActionJob[] = [];
   #sent = new Set<string>();
@@ -74,11 +76,12 @@ class MemoryQueue {
     const job = topic === inboxTopic ? this.#inbox.shift() : this.#outbox.shift();
     if (!job) return false;
     await handler(job);
+    if (topic === outboxTopic) this.outboxHandled.resolve();
     return true;
   }
 }
 
-async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
+async function roomRoundTrip(t: TestContext, publicChannel: boolean, options?: { direct: boolean; addMember?: boolean }) {
   const relayKey = generateSecretKey();
   const relaySigningKey = getPublicKey(relayKey);
   const server = createServer((request, response) => {
@@ -108,9 +111,12 @@ async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
   const beforeJoining = finalizeEvent({
     kind: 9, created_at: created_at - 5, content: "older mention", tags: [["h", "test-room"], ["p", pubkey]],
   }, author);
-  const privateRoom = [["d", "test-room"], ["t", "stream"]];
+  const privateRoom = [["d", "test-room"], ["t", options?.direct ? "dm" : "stream"]];
   const publicRoom = [["d", "public-room"], ["t", "stream"]];
   const roomMembers = [["p", pubkey], ["p", getPublicKey(author)]];
+  const expandedRoster = [...roomMembers, ["p", getPublicKey(generateSecretKey())]];
+  let rosterChanged = false;
+  let publishedReplies = 0;
   const group = (kind: number, tags: string[][], key = relayKey) => finalizeEvent({ kind, created_at, tags, content: "" }, key);
   const challenge = "fixture-challenge";
   const reply = Promise.withResolvers<Event>();
@@ -138,16 +144,22 @@ async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
             case 39002:
               assert.deepEqual(filter["#p"], [pubkey]);
               assert.deepEqual(filter.authors, [relaySigningKey]);
-              events = [
+              if (filter["#d"]) {
+                assert.deepEqual(filter["#d"], ["test-room"]);
+                events = [group(39002, [...privateRoom, ...(rosterChanged ? expandedRoster : roomMembers)])];
+              } else events = [
                 group(39002, [...privateRoom, ...roomMembers]),
                 group(39002, [...publicRoom, ...roomMembers]),
                 group(39002, [["d", "outside-room"], ...roomMembers], author),
               ];
               break;
             case 39000:
-              assert.deepEqual(filter["#d"], ["test-room", "public-room"]);
-              events = [group(39000, [...privateRoom, [publicChannel ? "public" : "private"]]),
-                group(39000, [...publicRoom, ["public"], ...(publicChannel ? [["archived"]] : [])])];
+              events = [group(39000, [...privateRoom, [publicChannel ? "public" : "private"]])];
+              if (filter["#d"].includes("public-room")) {
+                events.push(group(39000, [...publicRoom, ["public"], ...(publicChannel ? [["archived"]] : [])]));
+              } else {
+                assert.deepEqual(filter["#d"], ["test-room"]);
+              }
               break;
             default:
               assert.deepEqual(filter["#h"], ["test-room"]);
@@ -163,7 +175,10 @@ async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
           const event: Event = eventOrSubscription;
           // An already-stored publish after a lost ACK must also settle the outbox action.
           socket.send(JSON.stringify(["OK", event.id, event.kind !== 9, event.kind === 9 ? "duplicate: stored" : ""]));
-          if (event.kind === 9) reply.resolve(event);
+          if (event.kind === 9) {
+            publishedReplies += 1;
+            reply.resolve(event);
+          }
           if (event.kind === 0 || event.kind === 10100) publishedProfiles.push(event);
         }
       } catch (error) {
@@ -207,11 +222,18 @@ async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
     assert.equal((await acceptAction(request("legacy-gateway-key"), agents, state, queue, async () => true, keyDigest)).status, 403);
     assert.equal((await acceptAction(request(key), agents, state, queue, async () => true, keyDigest)).status, 202);
     assert.equal((await acceptAction(request(key), agents, state, queue, async () => true, keyDigest)).status, 202);
+    if (options?.addMember) rosterChanged = true;
     return Response.json({ sessionId: "test-session", deliveryId: "test-delivery" }, { status: 202 });
   });
   const stop = new AbortController();
   const running = worker.run(stop.signal);
   try {
+    if (options?.addMember) {
+      await queue.outboxHandled.promise;
+      assert.equal(admissions[0]?.oneToOne, true);
+      assert.equal(publishedReplies, 0);
+      return;
+    }
     const event = await Promise.race([
       reply.promise, pause(10_000, null, { ref: false }),
     ]);
@@ -236,6 +258,15 @@ async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
     assert.equal(admissions[0].text, question.content);
     assert.equal(admissions[0].community, new URL(relayUrl).origin);
     assert.equal(admissions[0].roomId, "test-room");
+    assert.equal(admissions[0].oneToOne, options?.direct ? true : undefined);
+    if (options?.direct) {
+      const agent = agents.get("test-agent")!;
+      const shared = inboundMessage(agent, question, new Map([["test-room", {
+        direct: true, visibility: "private", rosterAt: created_at, members: new Set(expandedRoster.map(tag => tag[1])),
+      }]]));
+      assert.equal(shared?.delivery.oneToOne, undefined);
+      assert.notEqual(shared?.delivery.conversationId, admissions[0].conversationId);
+    }
     assert(reconciled);
     assert(await state.read(healthPath));
     assert.equal(await state.read(deliveryPath({ ...admissions[0], eventId: unauthorizedRoom.id })), null);
@@ -257,6 +288,10 @@ async function roomRoundTrip(t: TestContext, publicChannel: boolean) {
 test("routes an invited private Buzz room and publishes a signed threaded reply", { timeout: 15_000 }, t => roomRoundTrip(t, false));
 test("replays a mention after joining a public channel while excluding earlier and nonmember messages",
   { timeout: 15_000 }, t => roomRoundTrip(t, true));
+test("attests a signed private pair and keeps its session separate from a group DM",
+  { timeout: 15_000 }, t => roomRoundTrip(t, false, { direct: true }));
+test("withholds a one-to-one reply when the signed roster grows before publication",
+  { timeout: 15_000 }, t => roomRoundTrip(t, false, { direct: true, addMember: true }));
 
 test("resolves a scoped Buzz grant from Connect and requests a relay-bound assertion", async t => {
   const signingKey = generateSecretKey();

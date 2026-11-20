@@ -29,6 +29,12 @@ export function roomDirectness(agent: Agent, channelId: string, author: string, 
   if (agent.channels.includes(channelId)) return false;
 }
 
+export function isOneToOneDm(agent: Agent, channelId: string, author: string, membership?: BuzzRooms): boolean {
+  const room = membership?.get(channelId);
+  return room?.direct === true && room.visibility === "private" && room.members.size === 2
+    && room.members.has(agent.pubkey) && room.members.has(author);
+}
+
 export function inboundMessage(agent: Agent, event: Event, membership?: BuzzRooms): {
   delivery: Delivery; target: Target; addressed: boolean;
 } | undefined {
@@ -38,6 +44,7 @@ export function inboundMessage(agent: Agent, event: Event, membership?: BuzzRoom
   const channelId = rooms[0][1];
   const direct = roomDirectness(agent, channelId, event.pubkey, membership);
   if (direct === undefined) return;
+  const oneToOne = isOneToOneDm(agent, channelId, event.pubkey, membership);
   const ancestry = event.tags.filter(tag => tag[0] === "e" && (tag[3] === "root" || tag[3] === "reply"));
   const root = ancestry.find(tag => tag[3] === "root")?.[1] ?? ancestry.find(tag => tag[3] === "reply")?.[1];
   if (root !== undefined && !keyHex.test(root)) return;
@@ -47,8 +54,11 @@ export function inboundMessage(agent: Agent, event: Event, membership?: BuzzRoom
   const mentioned = event.tags.some(tag => tag[0] === "p" && tag[1] === agent.pubkey);
   const parsed = deliverySchema.safeParse({
     version: 1, registrationId: agent.id, namespace: agent.namespace, eventId: event.id,
-    conversationId: stableId(agent.namespace, channelId, direct ? "direct" : rootId ?? event.id),
-    author: event.pubkey, direct, mentioned, visibility: membership?.get(channelId)?.visibility, text,
+    // A shared DM must never inherit the private pair's Eve conversation.
+    conversationId: oneToOne ? stableId(agent.namespace, channelId, "one-to-one", event.pubkey)
+      : stableId(agent.namespace, channelId, direct ? "direct" : rootId ?? event.id),
+    author: event.pubkey, direct, ...(oneToOne && { oneToOne: true }), mentioned,
+    visibility: membership?.get(channelId)?.visibility, text,
   });
   if (!parsed.success) return;
   return {

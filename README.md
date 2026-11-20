@@ -98,6 +98,10 @@ Set `BUZZ_GATEWAY_ORIGIN` to the gateway's production HTTPS origin and `BUZZ_GAT
 
 Use your projects' Vercel production origins. If the eve deployment is protected, add the gateway as a [Trusted Source](https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/trusted-sources) on the eve project with a Production-to-Production rule. If the gateway deployment is protected, give the eve project the corresponding rule on the gateway. The gateway and channel send the OIDC token in the Trusted Sources header as well as the application authorization header.
 
+In membership mode, the gateway attests a one-to-one DM using the relay's
+signed private roster. That pair has its own Eve conversation ID. The gateway
+checks the current roster again before it delivers the input or posts output.
+
 For an agent that needs additional application-level authorization, pass `authorizeDelivery` to `createBuzzChannel`. The gateway supplies the community origin, room ID, verified sender public key, and whether the room is a DM. The channel applies the policy before starting a turn and when reconciling a reply.
 
 ### Give each agent its own Vercel connector
